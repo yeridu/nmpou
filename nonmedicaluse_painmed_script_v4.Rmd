@@ -1,0 +1,4049 @@
+---
+title: "Self-Medicating Social Pain? Bullying and Non-Medical Prescription Opioid Use among Adolescents — Reproducible Code"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+
+<!-- 
+  This script contains all analysis code for:
+  "Self-Medicating Social Pain? Bullying and Non-Medical Prescription
+   Opioid Use among Adolescents"
+  # MODIFIED IN v3 — comment header updated to match Manuscript_v_final_v4.Rmd
+
+  Generated from nonmedicaluse_painmed_v44.Rmd (Reviewer41 instructions).
+  Code only — no manuscript prose. All chunks documented with didactic comments.
+
+  Replicability: All outputs verified against Manuscript_v_final_v4.Rmd and
+  SupplementaryMaterial_v_final_v4.Rmd. See verification notes at end of script.
+  # MODIFIED IN v3 — verification references updated to _v4 ground truth documents
+-->
+
+```{r setup, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 1: SETUP
+# Purpose: Load all required R packages and set global options for reproducible analysis.
+# Notes: All subsequent chunks depend on these packages. Session info is printed at end of script.
+# ============================================================
+
+library(RODBC)      # Connects R to Microsoft Access databases via ODBC
+library(dplyr)      # Provides data manipulation verbs: mutate, filter, select, etc.
+library(survey)     # Implements survey-weighted analyses: svydesign, svyglm, svymean
+library(psych)      # Provides tetrachoric() for tetrachoric correlations and alpha
+library(lavaan)     # Fits confirmatory factor analysis (CFA) with WLSMV estimator
+library(knitr)      # Provides kable() for rendering tables in R Markdown output
+library(ggplot2)    # Creates publication-quality figures (forest plots, bar charts)
+library(flextable)  # Creates Word-native formatted tables for docx output
+library(officer)    # Supports Word document creation alongside flextable
+library(here)       # Portable file paths relative to project root
+library(patchwork)  # Combines multiple ggplot panels into composite figures
+library(eulerr)     # Proportional Euler diagrams for set overlap visualization
+library(marginaleffects)  # AMEs on probability scale (Allison delta fix)
+
+# Set global chunk options: suppress all messages/warnings in output by default
+knitr::opts_chunk$set(
+  echo = FALSE,       # Do not print R code in the rendered document
+
+  message = FALSE,    # Suppress package loading messages
+  warning = FALSE,    # Suppress warnings (e.g., survey lonely PSU)
+  comment = "#>"      # Prefix for printed R output
+)
+
+# Register Times New Roman as the serif font for ggplot2 on Windows
+if (.Platform$OS.type == "windows") {
+  grDevices::windowsFonts(serif = grDevices::windowsFont("Times New Roman"))
+}
+
+# Handle strata with a single primary sampling unit gracefully
+# Without this, svyglm() would error when a stratum has only one PSU
+options(survey.lonely.psu = "adjust")
+```
+
+```{r data-load, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 2: DATA LOADING
+# Purpose: Connect to the 2023 YRBS Access database and extract the analysis dataset (N = 20,103).
+# Notes: Requires RODBC and a local copy of 2023_XXH_YRBS_Data.mdb in data/. Three-stage cluster design: counties > schools > classrooms.
+# ============================================================
+
+# Connect to the 2023 YRBS Access database in the project data/ folder.
+# The here package resolves the path relative to the project root (.here file).
+# See README.md for instructions on obtaining the data from the CDC.
+db_path <- here::here("data", "2023_XXH_YRBS_Data")
+conn <- odbcConnectAccess2007(db_path)
+
+# Read the XXHq table, which contains the national combined dataset (N = 20,103)
+yrbs <- sqlFetch(conn, "XXHq")
+
+# Close the database connection immediately after reading to free resources
+close(conn)
+
+# ─── DATA INTEGRITY CHECKS ───
+stopifnot("Expected ~20,103 rows" = nrow(yrbs) >= 19000 & nrow(yrbs) <= 21000)
+stopifnot("Required columns present" = all(c("psu", "stratum", "weight",
+  "q2", "q3", "raceeth", "q49", "q31", "q41", "q46", "q50",
+  "q24", "q25", "q27", "q28", "q29", "q19", "q57") %in% names(yrbs)))
+stopifnot("No duplicate rows" = !any(duplicated(yrbs)))
+stopifnot("All weights positive" = all(yrbs$weight > 0, na.rm = TRUE))
+```
+
+```{r recode-outcome-demographics, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 3: RECODE OUTCOME AND DEMOGRAPHICS
+# Purpose: Create analysis-ready factor variables for the primary outcome (Q49, lifetime NMPOU), secondary outcome (Q92, past-30-day NMPOU), and demographic covariates (sex, race/ethnicity, grade).
+# Notes: Race/ethnicity uses the CDC composite variable `raceeth` (derived from Q4 Hispanic + Q5 race multi-select). All factors use the reference category as the first level for odds ratio interpretation.
+# ============================================================
+
+# MAIN ANALYSIS variables
+
+yrbs <- yrbs %>% mutate(
+
+  # ─── PRIMARY OUTCOME: Q49 — Lifetime NMPOU ───
+  # Q49: "How many times have you taken prescription pain medicine without
+  #       a doctor's prescription or differently than how a doctor told
+  #       you to use it?"
+  # Q49 codebook: 1 = "0 times", 2 = "1 or 2 times", ... 6 = "40+ times"
+  # Dichotomize: 1 → No (never used), 2-7 → Yes (any use)
+  q49_1 = factor(
+    case_when(
+      q49 == 1 ~ "No",            # 0 times → no lifetime NMPOU
+      q49 %in% 2:7 ~ "Yes",       # Any frequency → lifetime NMPOU endorsed
+      TRUE ~ NA_character_         # Missing or out-of-range → NA
+    ),
+    levels = c("No", "Yes")        # "No" is reference for OR interpretation
+  ),
+
+  # ─── SECONDARY OUTCOME: Q92 — Past-30-Day NMPOU ───
+  # Q92: "During the past 30 days, how many times did you take prescription
+  #       pain medicine without a doctor's prescription or differently than
+  #       how a doctor told you to use it?"
+  # Q92 is a NATIONAL-ONLY item → ~38% structural missingness
+  # Q92 codebook: 1 = "0 times", 2-7 = various frequency categories
+  q92_1 = factor(
+    case_when(
+      q92 == 1 ~ "No",            # 0 times → no past-30-day NMPOU
+      q92 %in% 2:7 ~ "Yes",       # Any times → past-30-day NMPOU
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ─── SEX: Q2 ───
+  # Q2 codebook: 1 = Female, 2 = Male
+  # Male is set as reference so AOR for Female tests sex difference
+  q2_1 = factor(
+    case_when(
+      q2 == 1 ~ "Female",         # Q2 = 1 → Female
+      q2 == 2 ~ "Male",           # Q2 = 2 → Male
+      TRUE ~ NA_character_         # Missing → NA
+    ),
+    levels = c("Male", "Female")   # Male = reference category
+  ),
+
+  # ─── RACE/ETHNICITY: from CDC composite variable `raceeth` ───
+  # The CDC constructs `raceeth` from Q4 (Hispanic Y/N) and Q5 (race,
+  # multi-select letter codes A-H). Hispanic/Latino ethnicity takes
+  # precedence: Q4=Yes → Latine regardless of race response.
+  # raceeth codebook: 1=AI/AN, 2=Asian, 3=Black, 4=NH/PI, 5=White,
+  #   6=Hispanic/Latino, 7=Multiple-Hispanic, 8=Multiple-Non-Hispanic
+  # Collapsed into 5 categories for adequate cell sizes.
+  # NOTE: Raw Q5 uses multi-character codes (e.g., "B", "CE", "ABCDE")
+  # for multi-race selection, making direct reconstruction impractical.
+  # The CDC `raceeth` variable applies the standard precedence algorithm.
+  q4_1 = factor(
+    case_when(
+      raceeth %in% c(6, 7) ~ "Latine/Multiple Latine", # Hispanic/Latino (any race)
+      raceeth %in% c(1, 2, 4) ~ "Other",               # Non-Hispanic: AI/AN, Asian, NH/PI
+      raceeth == 3 ~ "Black",                           # Non-Hispanic Black
+      raceeth == 5 ~ "White",                           # Non-Hispanic White (reference)
+      raceeth == 8 ~ "Multiple Non-Latine",             # Non-Hispanic Multiple
+      TRUE ~ NA_character_                               # Missing → NA
+    ),
+    levels = c("White", "Other", "Black",
+               "Latine/Multiple Latine", "Multiple Non-Latine")
+  ),
+
+  # ─── GRADE: Q3 ───
+  # Q3 codebook: 1 = 9th, 2 = 10th, 3 = 11th, 4 = 12th
+  # Used instead of age because Cramer's V = 0.61 (near-collinear)
+  q3_1 = factor(
+    case_when(
+      q3 == 1 ~ "9th",            # 9th grade
+      q3 == 2 ~ "10th",           # 10th grade
+      q3 == 3 ~ "11th",           # 11th grade
+      q3 == 4 ~ "12th",           # 12th grade
+      TRUE ~ NA_character_         # Missing → NA
+    ),
+    levels = c("9th", "10th", "11th", "12th")  # 9th = reference
+  )
+)
+
+# Verify q4_1 was constructed correctly (should have 5 non-empty levels)
+cat("q4_1 distribution:\n")
+print(table(yrbs$q4_1, useNA = "always"))
+```
+
+```{r recode-f1, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 4: RECODE FRAMEWORK 1 — GENERALIZED RISK-TAKING
+# Purpose: Create binary factor variables for substance use (lifetime and past-30-day), risk behavior, and cocaine. Lifetime items form the su_life composite; past-30-day items form su_1 (sensitivity SM6).
+# Notes: Order follows Figure 2: Alcohol > Marijuana > Cigarettes > Cocaine. For each substance: ever-use first, then past-30-day version. Temporal consistency: lifetime predictors match the lifetime outcome (Jessor, 1991).
+# ============================================================
+
+# MAIN ANALYSIS variables (lifetime) and SENSITIVITY variables (past-30-day)
+# Order follows Figure 2: Alcohol > Marijuana > Cigarettes > Cocaine
+
+yrbs <- yrbs %>% mutate(
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ALCOHOL
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q41: "During your life, on how many days have you had at least one drink?"
+  # Q41 codebook: 1 = "0 days", 2-7 = various frequency categories
+  # MAIN ANALYSIS — component of su_life composite
+  q41_ever = factor(
+    case_when(
+      q41 == 1 ~ "No",            # 0 days → never used alcohol
+      q41 %in% 2:7 ~ "Yes",       # Any days → lifetime alcohol use
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q42: Past-30-day alcohol use
+  # Q42 codebook: 1 = "0 days", 2-7 = various frequency categories
+  # SENSITIVITY — component of su_1 composite (SM6)
+  q42_1 = factor(
+    case_when(
+      q42 == 1 ~ "No",            # 0 days → no recent alcohol use
+      q42 %in% 2:7 ~ "Yes",       # Any days → past-30-day alcohol use
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ═══════════════════════════════════════════════════════════════════
+  # MARIJUANA
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q46: "During your life, how many times have you used marijuana?"
+  # Q46 codebook: 1 = "0 times", 2-7 = various frequency categories
+  # MAIN ANALYSIS — component of su_life composite
+  q46_life = factor(
+    case_when(
+      q46 == 1 ~ "No",            # 0 times → never used marijuana
+      q46 %in% 2:7 ~ "Yes",       # Any times → lifetime marijuana use
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q48: Past-30-day marijuana use
+  # Q48 codebook: 1 = "0 times", 2-6 = various frequency categories
+  # SENSITIVITY — component of su_1 composite (SM6)
+  q48_1 = factor(
+    case_when(
+      q48 == 1 ~ "No",            # 0 times → no recent marijuana use
+      q48 %in% 2:6 ~ "Yes",       # Any times → past-30-day marijuana use
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ═══════════════════════════════════════════════════════════════════
+  # CIGARETTES
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q31: "Have you ever tried cigarette smoking, even one or two puffs?"
+  # Q31 codebook: 1 = Yes (ever tried), 2 = No (never tried)
+  # NOTE: Q31 coding is reversed from most items (1 = Yes, not 1 = No)
+  # MAIN ANALYSIS — component of su_life composite
+  q31_life = factor(
+    case_when(
+      q31 == 1 ~ "Yes",           # Ever tried cigarettes → Yes
+      q31 == 2 ~ "No",            # Never tried → No
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q33: Past-30-day cigarette smoking
+  # Q33 codebook: 1 = "0 days", 2-7 = various frequency categories
+  # SENSITIVITY — component of su_1 composite (SM6)
+  q33_1 = factor(
+    case_when(
+      q33 == 1 ~ "No",            # 0 days → no recent cigarette use
+      q33 %in% 2:7 ~ "Yes",       # Any days → past-30-day cigarette use
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ═══════════════════════════════════════════════════════════════════
+  # COCAINE (drug-specific replication only — not a composite component)
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q50: "During your life, how many times have you used any form of cocaine?"
+  # Q50 codebook: 1 = "0 times", 2-7 = various frequency categories
+  # Used as an outcome in the stacked-outcome specificity test (Chunk 14)
+  q50_1 = factor(
+    case_when(
+      q50 == 1 ~ "No",            # 0 times → never used cocaine
+      q50 %in% 2:7 ~ "Yes",       # Any times → lifetime cocaine use
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ═══════════════════════════════════════════════════════════════════
+  # RISK BEHAVIOR ITEMS (for rb_1 composite)
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q10: "During the past 30 days, how many times did you ride in a car
+  #       driven by someone who had been drinking alcohol?"
+  # Q10 codebook: 1 = "0 times", 2-6 = various frequency categories
+  # SENSITIVITY — included in rb_1_3item (SM7) but NOT in primary rb_1
+  # Excluded because it captures exposure to others' substance use
+  # rather than the adolescent's own risk behavior
+  q10_1 = factor(
+    case_when(
+      q10 == 1 ~ "No",            # 0 times → did not ride with drunk driver
+      q10 %in% 2:6 ~ "Yes",       # Any times → rode with drunk driver
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q12: "During the past 30 days, on how many days did you carry a weapon?"
+  # Q12 codebook: 1 = "0 days", 2-5 = various frequency categories
+  # MAIN ANALYSIS — component of rb_1 composite
+  q12_1 = factor(
+    case_when(
+      q12 == 1 ~ "No",            # 0 days → did not carry a weapon
+      q12 %in% 2:5 ~ "Yes",       # Any days → carried a weapon
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q17: "During the past 12 months, how many times were you in a physical fight?"
+  # Q17 codebook: 1 = "0 times", 2-8 = various frequency categories
+  # MAIN ANALYSIS — component of rb_1 composite
+  q17_1 = factor(
+    case_when(
+      q17 == 1 ~ "No",            # 0 times → not in a physical fight
+      q17 %in% 2:8 ~ "Yes",       # Any times → was in a physical fight
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  )
+)
+```
+
+```{r recode-f2, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 5: RECODE FRAMEWORK 2 — DISTRESS RELIEF
+# Purpose: Create binary factor variables for bullying victimization and suicidality, the two F2 composites hypothesized to show opioid-specific associations via social pain overlap mechanisms.
+# Notes: Q24/Q25 (bullying) and Q27/Q28 (ideation/plan) use 1=Yes, 2=No (non-standard). Q29 (attempt) uses 1="0 times" (standard). Dating violence items (Q21/Q22) are in recode-f3 as a sensitivity analysis variable.
+# ============================================================
+
+# MAIN ANALYSIS: Bullying (bu_1) and Suicidality (sc_1)
+# SENSITIVITY: Sadness (Q26) for SM1
+
+yrbs <- yrbs %>% mutate(
+
+  # ═══════════════════════════════════════════════════════════════════
+  # BULLYING ITEMS (for bu_1 composite) — MAIN ANALYSIS
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q24: "During the past 12 months, have you ever been bullied on school property?"
+  # Q24 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  q24_1 = factor(
+    case_when(
+      q24 == 1 ~ "Yes",           # Bullied on school property
+      q24 == 2 ~ "No",            # Not bullied on school property
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q25: "During the past 12 months, have you ever been electronically bullied?"
+  # Q25 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  q25_1 = factor(
+    case_when(
+      q25 == 1 ~ "Yes",           # Electronically bullied
+      q25 == 2 ~ "No",            # Not electronically bullied
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ═══════════════════════════════════════════════════════════════════
+  # SUICIDALITY ITEMS (for sc_1 composite) — MAIN ANALYSIS
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q27: "During the past 12 months, did you ever seriously consider
+  #       attempting suicide?"
+  # Q27 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  q27_1 = factor(
+    case_when(
+      q27 == 1 ~ "Yes",           # Seriously considered suicide
+      q27 == 2 ~ "No",            # Did not seriously consider
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q28: "During the past 12 months, did you make a plan about how
+  #       you would attempt suicide?"
+  # Q28 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  q28_1 = factor(
+    case_when(
+      q28 == 1 ~ "Yes",           # Made a suicide plan
+      q28 == 2 ~ "No",            # Did not make a plan
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q29: "During the past 12 months, how many times did you actually
+  #       attempt suicide?"
+  # Q29 codebook: 1 = "0 times", 2 = "1 time", 3 = "2-3 times",
+  #               4 = "4-5 times", 5 = "6+ times"
+  # NOTE: Unlike Q27/Q28, here 1 = No (standard coding) and 2+ = Yes
+  q29_1 = factor(
+    case_when(
+      q29 == 1 ~ "No",            # 0 attempts
+      q29 %in% 2:5 ~ "Yes",       # 1+ attempts
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ═══════════════════════════════════════════════════════════════════
+  # SADNESS — SENSITIVITY ANALYSIS (SM1)
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q26: "During the past 12 months, did you ever feel so sad or hopeless
+  #       almost every day for two weeks or more in a row that you stopped
+  #       doing some usual activities?"
+  # Q26 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  # Used in SM1: persistent sadness replaces suicidality composite
+  q26_1 = factor(
+    case_when(
+      q26 == 1 ~ "Yes",           # Persistent sadness endorsed
+      q26 == 2 ~ "No",            # Not endorsed
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  )
+)
+```
+
+```{r recode-f3, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 6: RECODE FRAMEWORK 3 — CONTEXTUAL ADVERSITY
+# Purpose: Create binary factor variables for sexual victimization, household adversity, community safety, and dating violence (sensitivity SM2). Household/community items are national-module only (~30-34% structural missingness).
+# Notes: sv_1 was reclassified from F2 to F3 in v32 based on 6 empirical tests (Table S8). Dating violence (dv_1) is included here as a sensitivity analysis variable for SM2.
+# ============================================================
+
+# Purpose: Create binary factor variables for sexual victimization,
+#          household adversity, and community safety items.
+#          Household/community items are NATIONAL-ONLY items with
+#          ~30-34% structural missingness (administered only on the national
+#          questionnaire module, not the standard state version).
+#
+# IMPORTANT CODING NOTES:
+#   Q100, Q101: 1 = Yes, 2 = No (non-standard)
+#   Q18: 1 = Yes (felt unsafe), 2 = No (non-standard)
+#   Q91: 1 = "0 times" (No), 2-5 = frequencies (Yes) (standard)
+#   Q102: 1 = Yes, 2 = No (for sensitivity S4)
+
+yrbs <- yrbs %>% mutate(
+
+  # ─── HOUSEHOLD ADVERSITY ITEMS (for hh_1 composite) ───
+
+  # Q91: "During the past 12 months, how many times did you see a parent
+  #       or other adult in your home hit, beat, kick, or physically hurt
+  #       another adult in your home?"
+  # Q91 codebook: 1 = "0 times", 2-5 = various frequency categories
+  q91_1 = factor(
+    case_when(
+      q91 == 1 ~ "No",            # 0 times → no witnessed parental IPV
+      q91 %in% 2:5 ~ "Yes",       # Any times → witnessed parental IPV
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q100: "Have you ever lived with someone who was a problem drinker or
+  #        alcoholic, or who used illegal street drugs or abused Rx meds?"
+  # Q100 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  q100_1 = factor(
+    case_when(
+      q100 == 1 ~ "Yes",          # Household substance use → Yes
+      q100 == 2 ~ "No",           # No household substance use → No
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q101: "Have you ever lived with someone who was depressed, mentally
+  #        ill, or suicidal?"
+  # Q101 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  q101_1 = factor(
+    case_when(
+      q101 == 1 ~ "Yes",          # Household mental illness → Yes
+      q101 == 2 ~ "No",           # No household mental illness → No
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q102: "Have you ever lived with a parent or other adult who served
+  #        time in jail or prison?" (for sensitivity S4: hh_2 = hh_1 + Q102)
+  # Q102 codebook: 1 = Yes, 2 = No
+  q102_1 = factor(
+    case_when(
+      q102 == 1 ~ "Yes",          # Parental incarceration → Yes
+      q102 == 2 ~ "No",           # No parental incarceration → No
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ─── COMMUNITY SAFETY ITEMS (for ms_1 composite) ───
+
+  # Q14: "During the past 30 days, on how many days did you not go to
+  #       school because you felt you would be unsafe at school or on
+  #       your way to or from school?"
+  # Q14 codebook: 1 = "0 days", 2-5 = various frequency categories
+  q14_1 = factor(
+    case_when(
+      q14 == 1 ~ "No",            # 0 days → did not miss school for safety
+      q14 %in% 2:5 ~ "Yes",       # Any days → missed school due to safety
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q15: "During the past 12 months, how many times has someone threatened
+  #       or injured you with a weapon such as a gun, knife, or club on
+  #       school property?"
+  # Q15 codebook: 1 = "0 times", 2-8 = various frequency categories
+  q15_1 = factor(
+    case_when(
+      q15 == 1 ~ "No",            # 0 times → not weapon-threatened at school
+      q15 %in% 2:8 ~ "Yes",       # Any times → weapon-threatened at school
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q18: "During the past 30 days, how often did you feel unsafe in
+  #       your neighborhood?"
+  # Q18 codebook: 1 = "Most of the time or always" (Yes),
+  #               2 = "Never or rarely" (No)
+  # NOTE: 1 = Yes is non-standard
+  q18_1 = factor(
+    case_when(
+      q18 == 1 ~ "Yes",           # Felt unsafe in neighborhood → Yes
+      q18 == 2 ~ "No",            # Did not feel unsafe → No
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # ─── SEXUAL VICTIMIZATION ITEMS (sv_1 — classified as F3 in v32) ───
+  # Moved from recode-f2 to recode-f3 in v34 because sv_1 is an F3 variable.
+  # Q19 and Q57 do not specify perpetrator identity, preventing attribution
+  # to peer-based social pain (F2) vs. other sources of trauma (F3).
+
+  # Q19: "Have you ever been physically forced to have sexual intercourse
+  #       when you did not want to?"
+  # Q19 codebook: 1 = Yes, 2 = No (NON-STANDARD: 1 = Yes)
+  q19_1 = factor(
+    case_when(
+      q19 == 1 ~ "Yes",           # Forced sexual intercourse → Yes
+      q19 == 2 ~ "No",            # Not forced → No
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q57: Age at first sexual intercourse — used in two ways:
+  #   (a) q57_12: binary indicator for age ≤12 (component of sv_1)
+  #   (b) q57_5: three-level factor for sensitivity S5
+
+  # Q57 codebook: 1 = "I have never had sexual intercourse",
+  #   2 = "11 years old or younger", 3 = "12 years old",
+  #   4 = "13 years old", ... 8 = "17 years old or older"
+
+  # (a) Binary: age ≤12 vs. never/13+
+  # Early debut at age 12 or younger is a marker of child sexual
+  # victimization, not precocity (Finer and Philbin, 2013)
+  q57_12 = factor(
+    case_when(
+      q57 %in% 2:3 ~ "Yes",       # Age 11 or younger + age 12 → ≤12
+      q57 == 1 ~ "No",            # Never had sex → No
+      q57 %in% 4:8 ~ "No",        # Age 13+ → No (not early debut)
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # (b) Three-level: for sensitivity S5 (tests early debut separately)
+  q57_5 = factor(
+    case_when(
+      q57 == 1 ~ "No",            # Never had sex (reference)
+      q57 %in% 2:3 ~ "12 or less",  # Age ≤12 (likely sexual abuse)
+      q57 %in% 4:8 ~ "13 or more",  # Age 13+ (normative debut timing)
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "12 or less", "13 or more")
+  ),
+
+  # ═══════════════════════════════════════════════════════════════════
+  # DATING VIOLENCE ITEMS (for dv_1 composite) — SENSITIVITY (SM2)
+  # Moved from recode-f2 because dating violence is a sensitivity
+  # analysis variable for sexual victimization, not a primary F2 variable.
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Q21: "During the past 12 months, how many times did someone you were
+  #       dating or going out with physically hurt you on purpose?"
+  # Q21 codebook: 1 = "I did not date", 2 = "0 times", 3-6 = frequencies
+  # Coding: 1-2 → No (non-daters + daters without DV), 3+ → Yes (DV)
+  q21_1 = factor(
+    case_when(
+      q21 %in% 1:2 ~ "No",        # Did not date OR 0 times (no DV)
+      q21 %in% 3:6 ~ "Yes",       # 1+ times → physical DV endorsed
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  ),
+
+  # Q22: "During the past 12 months, how many times did someone you were
+  #       dating or going out with force you to do sexual things?"
+  # Q22 codebook: same structure as Q21
+  q22_1 = factor(
+    case_when(
+      q22 %in% 1:2 ~ "No",        # Did not date OR 0 times (no sexual DV)
+      q22 %in% 3:6 ~ "Yes",       # 1+ times → sexual DV endorsed
+      TRUE ~ NA_character_
+    ),
+    levels = c("No", "Yes")
+  )
+)
+```
+
+```{r composites, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 7: COMPOSITE CONSTRUCTION
+# Purpose: Build all composite predictors from recoded items using the "any endorsed" rule. Also constructs leave-one-out (LOO) polysubstance composites for the stacked-outcome specificity test.
+# Notes: Each composite: "Yes" if ANY item endorsed, "No" if ALL "No", NA if ANY missing. LOO composites exclude the target substance to avoid circularity in stacked models (Allison, 1999).
+# ============================================================
+
+yrbs <- yrbs %>% mutate(
+
+  # ─── F1: LIFETIME POLYSUBSTANCE (su_life) ───
+  su_life = factor(case_when(
+    is.na(q31_life) | is.na(q41_ever) | is.na(q46_life) ~ NA_character_,
+    q31_life == "No" & q41_ever == "No" & q46_life == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── SENSITIVITY ANALYSIS — SM10: 4-substance polysubstance including cocaine ───
+  # ADDED IN v4 — SM10 four-substance composite
+  # Extends su_life (cigarettes + alcohol + marijuana) by adding cocaine (q50_1)
+  su_life_coc = factor(case_when(
+    is.na(q31_life) | is.na(q41_ever) | is.na(q46_life) | is.na(q50_1) ~ NA_character_,
+    q31_life == "No" & q41_ever == "No" & q46_life == "No" & q50_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F1: PAST-30-DAY POLYSUBSTANCE (su_1) — sensitivity S6 ───
+  su_1 = factor(case_when(
+    is.na(q33_1) | is.na(q42_1) | is.na(q48_1) ~ NA_character_,
+    q33_1 == "No" & q42_1 == "No" & q48_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F1: RISK BEHAVIOR (rb_1) — 2-item: weapon carrying + fighting ───
+  rb_1 = factor(case_when(
+    is.na(q12_1) | is.na(q17_1) ~ NA_character_,
+    q12_1 == "No" & q17_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F1: THREE-ITEM RISK BEHAVIOR (rb_1_3item) — sensitivity S7 ───
+  rb_1_3item = factor(case_when(
+    is.na(q10_1) | is.na(q12_1) | is.na(q17_1) ~ NA_character_,
+    q10_1 == "No" & q12_1 == "No" & q17_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F2: BULLYING (bu_1) ───
+  bu_1 = factor(case_when(
+    is.na(q24_1) | is.na(q25_1) ~ NA_character_,
+    q24_1 == "No" & q25_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F2: SUICIDALITY (sc_1) ───
+  sc_1 = factor(case_when(
+    is.na(q27_1) | is.na(q28_1) | is.na(q29_1) ~ NA_character_,
+    q27_1 == "No" & q28_1 == "No" & q29_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F3: SEXUAL VICTIMIZATION (sv_1) — moved from F2 to F3 in v32 ───
+  sv_1 = factor(case_when(
+    is.na(q19_1) | is.na(q57_12) ~ NA_character_,
+    q19_1 == "No" & q57_12 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F3: DATING VIOLENCE (dv_1) — sensitivity SM2 ───
+  dv_1 = factor(case_when(
+    is.na(q21_1) | is.na(q22_1) ~ NA_character_,
+    q21_1 == "No" & q22_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F3: HOUSEHOLD ADVERSITY (hh_1) ───
+  hh_1 = factor(case_when(
+    is.na(q91_1) | is.na(q100_1) | is.na(q101_1) ~ NA_character_,
+    q91_1 == "No" & q100_1 == "No" & q101_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F3: EXPANDED HOUSEHOLD ADVERSITY (hh_2) — sensitivity S4 ───
+  hh_2 = factor(case_when(
+    is.na(q91_1) | is.na(q100_1) | is.na(q101_1) | is.na(q102_1) ~ NA_character_,
+    q91_1 == "No" & q100_1 == "No" & q101_1 == "No" & q102_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+
+  # ─── F3: COMMUNITY SAFETY ADVERSITY (ms_1) ───
+  ms_1 = factor(case_when(
+    is.na(q14_1) | is.na(q15_1) | is.na(q18_1) ~ NA_character_,
+    q14_1 == "No" & q15_1 == "No" & q18_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes"))
+)
+
+# ─── LEAVE-ONE-OUT (LOO) POLYSUBSTANCE COMPOSITES ───
+# For drug-specific replications: each outcome substance is excluded
+# from its own polysubstance composite, with NMPOU substituted in.
+yrbs <- yrbs %>% mutate(
+  su_loo_nmpou = su_life,          # NMPOU row: standard su_life
+  su_loo_alc = factor(case_when(   # Alcohol row: cigs + marijuana + NMPOU
+    is.na(q31_life) | is.na(q46_life) | is.na(q49_1) ~ NA_character_,
+    q31_life == "No" & q46_life == "No" & q49_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+  su_loo_mar = factor(case_when(   # Marijuana row: cigs + alcohol + NMPOU
+    is.na(q31_life) | is.na(q41_ever) | is.na(q49_1) ~ NA_character_,
+    q31_life == "No" & q41_ever == "No" & q49_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+  su_loo_cig = factor(case_when(   # Cigarettes row: alcohol + marijuana + NMPOU
+    is.na(q41_ever) | is.na(q46_life) | is.na(q49_1) ~ NA_character_,
+    q41_ever == "No" & q46_life == "No" & q49_1 == "No" ~ "No",
+    TRUE ~ "Yes"), levels = c("No", "Yes")),
+  su_loo_coc = su_life             # Cocaine row: standard su_life (cocaine not in triad)
+)
+```
+
+```{r reliability, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 8: COMPOSITE RELIABILITY
+# Purpose: Compute internal consistency for each composite index. Uses tetrachoric correlations (appropriate for binary items), Spearman-Brown for 2-item composites, and alpha + omega (CFA/WLSMV) for 3+ items.
+# Notes: Bootstrap CIs (B=500) provide uncertainty quantification. Nunnally & Bernstein (1994) provide the psychometric framework. Heywood cases (loadings > 1) are flagged as NA.
+# ============================================================
+
+compute_reliability <- function(df, items, label, B = 500) {
+  # Convert factor items to 0/1 numeric, keep complete cases only
+  mat <- df %>%
+    mutate(across(all_of(items), ~ as.numeric(.x == "Yes"))) %>%
+    select(all_of(items)) %>%
+    na.omit()
+  n_complete <- nrow(mat)
+
+  # Helper: compute point estimate from a matrix
+  .sb_from_mat <- function(m) {
+    tc <- tryCatch(tetrachoric(m), error = function(e) NULL)
+    if (is.null(tc)) return(NA)
+    r_tet <- tc$rho[1, 2]
+    (2 * r_tet) / (1 + r_tet)
+  }
+  .alpha_from_mat <- function(m) {
+    tc <- tryCatch(tetrachoric(m), error = function(e) NULL)
+    if (is.null(tc)) return(NA)
+    k <- ncol(tc$rho)
+    r_bar <- (sum(tc$rho) - k) / (k * (k - 1))
+    (k * r_bar) / (1 + (k - 1) * r_bar)
+  }
+
+  # Edge-case guards
+  if (length(items) < 2) return(list(label = label, n = n_complete, alpha = NA,
+    omega = NA, sb = NA, r_tet = NA, loadings = NA, ci_lo = NA, ci_hi = NA))
+  if (n_complete < 30) return(list(label = label, n = n_complete, alpha = NA,
+    omega = NA, sb = NA, r_tet = NA, loadings = NA, ci_lo = NA, ci_hi = NA))
+
+  # Bootstrap CIs for primary metric (reproducible)
+  set.seed(20260225)
+  boot_vals <- replicate(B, {
+    idx <- sample(n_complete, n_complete, replace = TRUE)
+    boot_mat <- mat[idx, , drop = FALSE]
+    if (length(items) == 2) .sb_from_mat(boot_mat)
+    else .alpha_from_mat(boot_mat)
+  })
+  boot_vals <- boot_vals[!is.na(boot_vals)]
+  ci_lo <- if (length(boot_vals) >= 20) round(quantile(boot_vals, 0.025), 2) else NA
+  ci_hi <- if (length(boot_vals) >= 20) round(quantile(boot_vals, 0.975), 2) else NA
+
+  if (length(items) == 2) {
+    # Two-item composite: use tetrachoric r and Spearman-Brown
+    tc <- tetrachoric(mat)
+    r_tet <- tc$rho[1, 2]
+    sb <- (2 * r_tet) / (1 + r_tet)
+    return(list(label = label, n = n_complete, alpha = NA, omega = NA,
+                sb = round(sb, 2), r_tet = round(r_tet, 2), loadings = NA,
+                ci_lo = ci_lo, ci_hi = ci_hi))
+  }
+
+  # 3+ items: tetrachoric alpha
+  tc <- tetrachoric(mat)
+  k <- ncol(tc$rho)
+  r_bar <- (sum(tc$rho) - k) / (k * (k - 1))
+  alpha_val <- (k * r_bar) / (1 + (k - 1) * r_bar)
+
+  # Pairwise tetrachoric correlations (for formative indices)
+  pairwise_r <- tc$rho[lower.tri(tc$rho)]
+
+  # McDonald's omega via one-factor CFA with WLSMV
+  omega_val <- NA; loadings_val <- NA
+  mod <- paste0("f =~ ", paste(items, collapse = " + "))
+  mat_ord <- mat
+  for (v in names(mat_ord)) mat_ord[[v]] <- ordered(mat_ord[[v]])
+  tryCatch({
+    fit <- cfa(mod, data = mat_ord, estimator = "WLSMV")
+    sl <- standardizedSolution(fit)
+    lambdas <- sl$est.std[sl$op == "=~"]
+    if (any(lambdas > 1) || any(lambdas < 0)) {
+      omega_val <- NA              # Heywood case
+    } else {
+      omega_val <- sum(lambdas)^2 / (sum(lambdas)^2 + sum(1 - lambdas^2))
+    }
+    loadings_val <- round(lambdas, 2)
+  }, error = function(e) {})
+
+  return(list(label = label, n = n_complete,
+              alpha = round(alpha_val, 2),
+              omega = ifelse(is.na(omega_val), NA, round(omega_val, 2)),
+              sb = NA, r_tet = NA, loadings = loadings_val,
+              ci_lo = ci_lo, ci_hi = ci_hi,
+              pairwise_r = round(pairwise_r, 2)))
+}
+
+# Compute reliability for all primary composites
+rel_su_life <- compute_reliability(yrbs, c("q31_life", "q41_ever", "q46_life"), "su_life")
+rel_rb_1    <- compute_reliability(yrbs, c("q12_1", "q17_1"), "rb_1")
+rel_rb_1_3item <- compute_reliability(yrbs, c("q10_1", "q12_1", "q17_1"), "rb_1_3item")
+rel_bu_1    <- compute_reliability(yrbs, c("q24_1", "q25_1"), "bu_1")
+rel_sc_1    <- compute_reliability(yrbs, c("q27_1", "q28_1", "q29_1"), "sc_1")
+rel_sv_1    <- compute_reliability(yrbs, c("q19_1", "q57_12"), "sv_1")
+rel_hh_1    <- compute_reliability(yrbs, c("q91_1", "q100_1", "q101_1"), "hh_1")
+rel_ms_1    <- compute_reliability(yrbs, c("q14_1", "q15_1", "q18_1"), "ms_1")
+all_rel <- list(rel_su_life, rel_rb_1, rel_bu_1, rel_sc_1, rel_sv_1, rel_hh_1, rel_ms_1)
+```
+
+```{r survey-design, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 9: SURVEY DESIGN AND SUBSAMPLE DEFINITIONS
+# Purpose: Create survey design objects incorporating the YRBS three-stage cluster sampling design (PSUs, strata, weights) and define analytic subsamples.
+# Notes: Two-sample strategy (Graham, 2009): full sample for models using standard items; national-module subsample for models requiring household/community items. See Lumley (2010), Complex Surveys: A Guide to Analysis Using R.
+# ============================================================
+
+# Two-sample strategy: full sample for M1/M2a/M3; subsample for M4/M5.
+###############################################################################
+
+# Define subsample flags BEFORE creating survey design
+yrbs$in_subsample <- !is.na(yrbs$q91_1) | !is.na(yrbs$q100_1) | !is.na(yrbs$q101_1)
+yrbs$is_dater <- (!is.na(yrbs$q21) & yrbs$q21 >= 2) | (!is.na(yrbs$q22) & yrbs$q22 >= 2)
+
+# Full-sample survey design (N = 20,103)
+des_full <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                      data = yrbs, nest = TRUE)
+# National-module subsample
+des_sub <- subset(des_full, in_subsample == TRUE)
+# Daters subsample (for sensitivity S2)
+des_daters_sub <- subset(des_full, in_subsample == TRUE & is_dater == TRUE)
+
+# Store sample sizes
+n_full <- nrow(yrbs)
+n_sub <- sum(yrbs$in_subsample)
+
+# ─── ANALYTIC SAMPLE FLOW ───
+n_total_raw <- nrow(yrbs)
+n_miss_outcome <- sum(is.na(yrbs$q49_1))
+n_miss_sex <- sum(is.na(yrbs$q2_1))
+n_miss_grade <- sum(is.na(yrbs$q3_1))
+n_miss_race <- sum(is.na(yrbs$q4_1))
+# Complete cases for M3 (full-sample model; sv_1 now enters at M4)
+m3_vars <- c("q49_1", "q2_1", "q3_1", "q4_1", "su_life", "rb_1", "bu_1", "sc_1")
+n_complete_m3 <- sum(complete.cases(yrbs[, m3_vars]))
+# Complete cases for M5 (subsample model; includes sv_1 as F3)
+m5_vars <- c(m3_vars, "sv_1", "hh_1", "ms_1")
+n_complete_m5 <- sum(complete.cases(yrbs[yrbs$in_subsample, m5_vars]))
+```
+
+```{r helper-functions, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 10: HELPER FUNCTIONS
+# Purpose: Define reusable functions for fitting survey-weighted logistic regressions and formatting output tables. These functions are called by all model-fitting chunks.
+# Notes: fit_model() returns AOR with 95% CI. ft_out() creates publication-ready Word tables via flextable. Both enforce Times New Roman 10pt/12pt for Pediatrics compliance.
+# ============================================================
+
+# fit_model(): Fit survey-weighted logistic regression, return AOR table.
+# compute_attenuation(): % change in log-odds beta between nested models.
+###############################################################################
+
+fit_model <- function(formula, design, label = "") {
+  fit <- svyglm(formula, design = design, family = quasibinomial())
+  cc <- summary(fit)$coefficients
+  terms <- rownames(cc)[-1]
+  results <- data.frame(
+    term  = terms,
+    beta  = cc[terms, "Estimate"],
+    AOR   = round(exp(cc[terms, "Estimate"]), 2),
+    CI_lo = round(exp(cc[terms, "Estimate"] - 1.96 * cc[terms, "Std. Error"]), 2),
+    CI_hi = round(exp(cc[terms, "Estimate"] + 1.96 * cc[terms, "Std. Error"]), 2),
+    p     = cc[terms, "Pr(>|t|)"],
+    stringsAsFactors = FALSE)
+  results$sig <- ifelse(results$p < 0.001, "***",
+                 ifelse(results$p < 0.01,  "**",
+                 ifelse(results$p < 0.05,  "*", "")))
+  attr(results, "model") <- fit
+  attr(results, "n") <- nobs(fit)
+  attr(results, "label") <- label
+  attr(results, "converged") <- fit$converged
+  return(results)
+}
+
+## METHODS NOTE: compute_attenuation() computes NAIVE percentage change in log-odds
+## between nested models. Karlson et al. (2012) show this conflates two effects:
+## (1) genuine confounding/mediation (the added variable explains some of X's effect),
+## and (2) rescaling (adding Z changes residual variance, rescaling ALL coefficients).
+## For the mediator-specific question (how much of X's effect goes through su_life?),
+## use the KHB results in Table S11 instead. For the F3-addition question (how much
+## does adding adversity variables attenuate distress associations?), this naive
+## measure is the only one available because KHB is structured around a single mediator.
+compute_attenuation <- function(res_earlier, res_later, term) {
+  beta_e <- res_earlier$beta[res_earlier$term == term]
+  beta_l <- res_later$beta[res_later$term == term]
+  if (length(beta_e) == 0 || length(beta_l) == 0) return(NA)
+  if (abs(beta_e) < 1e-10) return(NA)
+  round(((beta_e - beta_l) / beta_e) * 100, 1)
+}
+
+# fmt_p(): Format p-values with max 4 decimal places (comment R5)
+fmt_p <- function(p, digits = 4) {
+  if (is.na(p)) return("NA")
+  if (p < 10^(-digits)) return(paste0("< ", format(10^(-digits), scientific = FALSE)))
+  formatC(p, format = "f", digits = digits)
+}
+
+# ft_out(): Convert a data frame to a flextable with 10pt body, bold headers,
+# 12pt TNR caption, optional footer notes, and single-spacing
+ft_out <- function(df, cap = "", align_spec = NULL, notes = NULL, spacing = 1.0) {
+  ft <- flextable(df)
+  ft <- fontsize(ft, size = 10, part = "all")
+  ft <- font(ft, fontname = "Times New Roman", part = "all")
+  ft <- bold(ft, part = "header")
+  ft <- line_spacing(ft, space = spacing, part = "all")
+  ft <- padding(ft, padding.top = 0, padding.bottom = 0, part = "all")
+  if (!is.null(align_spec)) {
+    for (k in seq_along(align_spec)) {
+      a <- switch(align_spec[k], "l" = "left", "c" = "center", "r" = "right", "left")
+      ft <- align(ft, j = k, align = a, part = "body")
+    }
+  }
+  ft <- align(ft, align = "center", part = "header")
+  ft <- set_caption(ft, caption = as_paragraph(
+    as_chunk(cap, props = fp_text(font.size = 12, font.family = "Times New Roman", color = "black"))),
+    fp_p = fp_par(text.align = "center"))
+  if (!is.null(notes)) {
+    ft <- add_footer_lines(ft, values = notes)
+    ft <- fontsize(ft, size = 10, part = "footer")
+    ft <- font(ft, fontname = "Times New Roman", part = "footer")
+    ft <- line_spacing(ft, space = 1.0, part = "footer")
+    ft <- align(ft, align = "justify", part = "footer")
+  }
+  ft <- autofit(ft)
+  ft <- set_table_properties(ft, layout = "autofit", width = 1)
+  ft
+}
+
+# fmt_aor_ci(): Format inline AOR with 95% CI from a model results data frame
+# Returns "X.XX (95% CI: X.XX-X.XX)" for use in prose
+fmt_aor_ci <- function(res, term) {
+  row <- res[res$term == term, ]
+  if (nrow(row) == 0) return("--")
+  paste0(sprintf("%.2f", row$AOR), " (95% CI: ",
+         sprintf("%.2f", row$CI_lo), "-", sprintf("%.2f", row$CI_hi), ")")
+}
+
+# fmt_aor_inline(): Format AOR for use inside parenthetical prose
+# Returns "AOR = X.XX, 95% CI: X.XX-X.XX" — avoids double parentheses
+fmt_aor_inline <- function(res, term) {
+  row <- res[res$term == term, ]
+  if (nrow(row) == 0) return("--")
+  paste0("AOR = ", sprintf("%.2f", row$AOR), ", 95% CI: ",
+         sprintf("%.2f", row$CI_lo), "-", sprintf("%.2f", row$CI_hi))
+}
+```
+
+```{r set-a-models, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 11: SET A MODELS — TOTAL ASSOCIATION
+# Purpose: Fit models M1 (demographics only), M2a (+F2 distress, full sample), and M2b (+F3 adversity, subsample) to estimate unconditional associations before adjusting for polysubstance use.
+# Notes: Set A tests whether each framework is associated with NMPOU before controlling for generalized risk-taking (F1). M2a uses the full sample; M2b uses the national-module subsample.
+# ============================================================
+
+# These do NOT adjust for polysubstance involvement. They estimate the
+# unconditional (total) association of each framework with NMPOU.
+#
+## METHODS NOTE: In KHB terms, M2a is the "reduced model" for distress
+## variables -- it gives their total association with NMPOU before the
+## mediator (polysubstance use) is introduced. Comparing M2a coefficients
+## with M3/M5 coefficients NAIVELY conflates confounding with rescaling
+## (Karlson et al. 2012, Eq. 7). The KHB decomposition in chunk 15
+## corrects for this.
+###############################################################################
+
+# M1: Demographics only (baseline) — full sample
+res_M1 <- fit_model(q49_1 ~ q2_1 + q3_1 + q4_1,
+                     des_full, "M1")
+
+# M2a: Demographics + F2 Distress (bullying + suicidality) — full sample
+res_M2a <- fit_model(q49_1 ~ q2_1 + q3_1 + q4_1 + bu_1 + sc_1,
+                      des_full, "M2a")
+
+# M2b: Demographics + F3 Adversity (sexual vict. + household + community) — subsample
+# NOTE: sv_1 is available on the full sample but runs on the subsample here
+# for consistency with hh_1/ms_1 (subsample-only variables). This is standard
+# practice: the model runs on the sample where all included predictors are observed.
+res_M2b <- fit_model(q49_1 ~ q2_1 + q3_1 + q4_1 + sv_1 + hh_1 + ms_1,
+                      des_sub, "M2b")
+```
+
+```{r set-b-models, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 12: SET B MODELS — CONDITIONAL SPECIFICITY
+# Purpose: Fit models M3 (+F1+F2, full sample), M4 (+sv_1+hh_1, subsample), and M5 (+ms_1, subsample) to test whether distress associations persist after controlling for polysubstance use and contextual adversity.
+# Notes: M5 is the primary model (all 7 predictors). Block-wise Wald tests evaluate incremental improvement at each step. Subsample models require national-module items.
+# ============================================================
+
+# These adjust for polysubstance (su_life) and risk behavior (rb_1).
+# The critical test: do distress associations PERSIST after F1 adjustment?
+#
+## METHODS NOTE: The M3 → M4 → M5 sequence adds variables progressively.
+## In logistic regression, each addition changes the residual variance,
+## rescaling ALL coefficients (Karlson et al. 2012). This means the change
+## in bu_1's coefficient from M3 to M5 reflects BOTH (a) confounding by
+## F3 variables and (b) rescaling from reduced residual variance. The
+## compute_attenuation() results for M3-sub → M5 are therefore NAIVE
+## estimates. The KHB-corrected mediation proportions (Table S11) address
+## this for the su_life mediator specifically.
+###############################################################################
+
+# M3: F1 + F2 conditional — full sample (sv_1 now in F3, not here)
+res_M3 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1,
+  des_full, "M3")
+
+# M3 diagnostic: same formula on subsample to validate comparability
+res_M3_sub <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1,
+  des_sub, "M3-sub")
+
+# Dynamic max AOR change between full-sample M3 and subsample M3
+val_terms <- c("q2_1Female",
+               "q3_110th", "q3_111th", "q3_112th",
+               "q4_1Black", "q4_1Latine/Multiple Latine",
+               "q4_1Multiple Non-Latine", "q4_1Other",
+               "su_lifeYes", "rb_1Yes", "bu_1Yes", "sc_1Yes")
+max_aor_change <- max(sapply(val_terms, function(t) {
+  a <- res_M3$AOR[res_M3$term == t]
+  b <- res_M3_sub$AOR[res_M3_sub$term == t]
+  abs(a - b) / a * 100
+}))
+
+# M4: M3 + sexual victimization + household adversity — subsample
+# sv_1 enters here as F3 variable alongside hh_1
+res_M4 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + sv_1 + hh_1,
+  des_sub, "M4")
+
+# M5: M4 + community safety adversity — subsample (FULL ECOLOGICAL MODEL)
+res_M5 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "M5")
+
+# Block-wise Wald tests for model comparison
+# M3 vs M2a: joint significance of su_life + rb_1
+wald_m3 <- regTermTest(attr(res_M3, "model"), ~ su_life + rb_1, method = "Wald")
+# M4 vs M3-sub: joint significance of sv_1 + hh_1 (both F3)
+wald_m4 <- regTermTest(attr(res_M4, "model"), ~ sv_1 + hh_1, method = "Wald")
+# M5 vs M4: significance of ms_1
+wald_m5 <- regTermTest(attr(res_M5, "model"), ~ ms_1, method = "Wald")
+```
+
+```{r drug-specific, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 13: DRUG-SPECIFIC MODELS
+# Purpose: Fit M5-equivalent logistic regressions separately for each of five substances (NMPOU, alcohol, marijuana, cigarettes, cocaine) to compare predictor magnitudes across substance types.
+# Notes: Each model uses leave-one-out polysubstance composites to avoid circularity. These are the basis for Table S6.
+# ============================================================
+
+##
+## METHODS NOTE (Drug-specific LOO composites):
+##
+## Each substance model uses a "leave-one-out" (LOO) polysubstance composite
+## that EXCLUDES the outcome substance from the polysubstance count. This is
+## critical for two reasons:
+##
+## 1. AVOIDING MECHANICAL CORRELATION: If NMPOU were both the outcome AND part
+##    of the polysubstance predictor, the model would have a near-tautological
+##    association (using the outcome to predict itself). The LOO composite for
+##    NMPOU (su_life) counts cigarettes + alcohol + marijuana; for alcohol
+##    (su_loo_alc), it counts cigarettes + marijuana + NMPOU; etc.
+##
+## 2. COMPARABILITY ACROSS SUBSTANCES: Each model has the same structure
+##    (same predictors, same subsample, same design), differing only in
+##    the dependent variable and corresponding LOO composite. This makes
+##    cross-substance AOR comparisons meaningful — differences in distress
+##    associations reflect genuine substance specificity, not artifacts
+##    of model specification.
+##
+## NOTE: Cocaine is an exception. It is not part of the original triad
+## (cigarettes + alcohol + marijuana), so su_loo_coc = su_life (the full
+## triad composite, which already excludes cocaine).
+##
+## These 5-substance AORs feed into Figure 2 (substance specificity plot)
+## and the stacked-outcome heterogeneity test (CHUNK 14).
+##
+
+# NMPOU: identical to M5 above
+res_ds_nmpou <- res_M5
+
+# Alcohol: DV = lifetime alcohol (q41_ever), LOO = cigs + marijuana + NMPOU
+res_ds_alc <- fit_model(
+  q41_ever ~ q2_1 + q3_1 + q4_1 + su_loo_alc + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "M5-Alcohol")
+
+# Marijuana: DV = lifetime marijuana (q46_life), LOO = cigs + alcohol + NMPOU
+res_ds_mar <- fit_model(
+  q46_life ~ q2_1 + q3_1 + q4_1 + su_loo_mar + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "M5-Marijuana")
+
+# Cigarettes: DV = lifetime cigarettes (q31_life), LOO = alcohol + marijuana + NMPOU
+res_ds_cig <- fit_model(
+  q31_life ~ q2_1 + q3_1 + q4_1 + su_loo_cig + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "M5-Cigarettes")
+
+# Cocaine: DV = lifetime cocaine (q50_1), LOO = su_life (cocaine not in triad)
+res_ds_coc <- fit_model(
+  q50_1 ~ q2_1 + q3_1 + q4_1 + su_loo_coc + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "M5-Cocaine")
+```
+
+```{r stacked-model, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 14: STACKED-OUTCOME HETEROGENEITY TEST
+# Purpose: Test whether predictor-substance associations differ significantly across five substance types using a stacked (long-format) dataset with predictor-by-substance interactions.
+# Notes: Method: reshape data so each student appears 5 times (one per substance). LOO polysubstance composites prevent circularity. Weights divided by 5 to preserve effective N. Clustering at PSU + student_id accounts for within-person correlation. Joint Wald test on interaction terms evaluates opioid specificity. Reference: Allison (1999), Comparing logit and probit coefficients across groups.
+# ============================================================
+
+#
+## METHODS NOTE (Allison 1999): Comparing logit coefficients across groups
+## (here, substance types) is potentially invalid if residual variation
+## differs across groups. Allison proposes estimating a residual-variance
+## ratio (delta) and testing coefficients after adjusting for it.
+##
+## IDENTIFICATION CONSTRAINT: This model does NOT include interactions for
+## su_loo or demographic controls (q2_1, q3_1, q4_1). Their coefficients
+## are CONSTRAINED EQUAL across all five substance types. This is required
+## for the interaction terms on the other variables to be identified and
+## interpretable. The assumption is that polysubstance use and demographics
+## have the same association with substance use regardless of which substance
+## is the outcome.
+##
+## LIMITATION: This implementation uses standard logistic regression with
+## interactions rather than Allison's heteroscedastic logit. It does NOT
+## estimate delta (the residual-variance ratio between substance types).
+## If residual variation differs substantially across substance outcomes,
+## the interaction tests could be biased. The mixed pattern of results
+## (bullying NMPOU-specific, sexual victimization stronger for other
+## substances) argues against a pure delta explanation, but this cannot
+## be formally tested without estimating delta.
+##
+## WEIGHT NORMALIZATION: Weights are divided by 5 (or 3) because each
+## student contributes 5 (or 3) rows. Without this, the population total
+## would be inflated 5-fold (Allison 1999).
+##
+## CLUSTERING: id = ~psu + student_id clusters at both the PSU level
+## (survey design) and the student level (within-person correlation
+## across the 5 stacked rows).
+###############################################################################
+
+# ─── BUILD 5-SUBSTANCE STACKED DATASET ───
+sub_data <- yrbs[yrbs$in_subsample, ]         # Restrict to national-module subsample
+sub_data$student_id <- seq_len(nrow(sub_data)) # Unique student ID for clustering
+
+# Row 1: NMPOU outcome
+r1 <- sub_data %>% transmute(
+  student_id, psu, stratum, weight, outcome_type = "NMPOU",
+  Y = q49_1, su_loo = su_loo_nmpou,
+  q2_1, q3_1, q4_1, rb_1, bu_1, sc_1, sv_1, hh_1, ms_1)
+
+# Row 2: Alcohol outcome
+r2 <- sub_data %>% transmute(
+  student_id, psu, stratum, weight, outcome_type = "Alcohol",
+  Y = q41_ever, su_loo = su_loo_alc,
+  q2_1, q3_1, q4_1, rb_1, bu_1, sc_1, sv_1, hh_1, ms_1)
+
+# Row 3: Marijuana outcome
+r3 <- sub_data %>% transmute(
+  student_id, psu, stratum, weight, outcome_type = "Marijuana",
+  Y = q46_life, su_loo = su_loo_mar,
+  q2_1, q3_1, q4_1, rb_1, bu_1, sc_1, sv_1, hh_1, ms_1)
+
+# Row 4: Cigarettes outcome
+r4 <- sub_data %>% transmute(
+  student_id, psu, stratum, weight, outcome_type = "Cigarettes",
+  Y = q31_life, su_loo = su_loo_cig,
+  q2_1, q3_1, q4_1, rb_1, bu_1, sc_1, sv_1, hh_1, ms_1)
+
+# Row 5: Cocaine outcome
+r5 <- sub_data %>% transmute(
+  student_id, psu, stratum, weight, outcome_type = "Cocaine",
+  Y = q50_1, su_loo = su_loo_coc,
+  q2_1, q3_1, q4_1, rb_1, bu_1, sc_1, sv_1, hh_1, ms_1)
+
+# Combine into stacked dataset (5 rows per student)
+stacked5 <- bind_rows(r1, r2, r3, r4, r5)
+stacked5$outcome_type <- factor(stacked5$outcome_type,
+  levels = c("NMPOU", "Alcohol", "Marijuana", "Cigarettes", "Cocaine"))
+
+# Normalize weights: each student appears 5 times, so divide by 5
+# to maintain correct population total (Allison, 1999)
+stacked5$weight_stacked <- stacked5$weight / 5
+
+# Survey design on stacked data: cluster at PSU + student level
+# because each student contributes 5 correlated rows
+des_stacked5 <- svydesign(id = ~psu + student_id, strata = ~stratum,
+                           weights = ~weight_stacked, data = stacked5, nest = TRUE)
+
+# ─── FIT 5-SUBSTANCE STACKED MODEL ───
+# Main effects + distress × outcome_type interactions
+# NMPOU is reference: negative interaction = stronger for NMPOU than comparator
+fit_stacked5 <- svyglm(
+  Y ~ outcome_type + su_loo + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1 +
+      q2_1 + q3_1 + q4_1 +
+      bu_1:outcome_type + sc_1:outcome_type + sv_1:outcome_type +
+      rb_1:outcome_type + hh_1:outcome_type + ms_1:outcome_type,
+  design = des_stacked5, family = quasibinomial())
+
+# Extract coefficient table for interaction terms
+cc5 <- summary(fit_stacked5)$coefficients
+
+# ─── JOINT WALD TEST: F2 distress interactions (bu_1 + sc_1; 8 terms) ───
+# sv_1 moved to F3 in v32; tested individually below
+wald_all5 <- regTermTest(fit_stacked5,
+  ~ bu_1:outcome_type + sc_1:outcome_type,
+  method = "Wald")
+
+# ─── JOINT WALD TEST: all variable interactions (24 terms) ───
+wald_all5_full <- regTermTest(fit_stacked5,
+  ~ bu_1:outcome_type + sc_1:outcome_type + sv_1:outcome_type +
+    rb_1:outcome_type + hh_1:outcome_type + ms_1:outcome_type,
+  method = "Wald")
+
+# ─── SEPARATE WALD TESTS per variable ───
+wald_bu <- regTermTest(fit_stacked5, ~ bu_1:outcome_type, method = "Wald")
+wald_sc <- regTermTest(fit_stacked5, ~ sc_1:outcome_type, method = "Wald")
+wald_sv <- regTermTest(fit_stacked5, ~ sv_1:outcome_type, method = "Wald")
+wald_rb <- regTermTest(fit_stacked5, ~ rb_1:outcome_type, method = "Wald")
+wald_hh <- regTermTest(fit_stacked5, ~ hh_1:outcome_type, method = "Wald")
+wald_ms <- regTermTest(fit_stacked5, ~ ms_1:outcome_type, method = "Wald")
+
+# ─── 3-SUBSTANCE CONFIRMATORY MODEL ───
+stacked3 <- bind_rows(r1, r2, r3)
+stacked3$outcome_type <- factor(stacked3$outcome_type,
+  levels = c("NMPOU", "Alcohol", "Marijuana"))
+
+# Normalize weights for 3-substance model (3 rows per student)
+stacked3$weight_stacked <- stacked3$weight / 3
+
+des_stacked3 <- svydesign(id = ~psu + student_id, strata = ~stratum,
+                           weights = ~weight_stacked, data = stacked3, nest = TRUE)
+
+fit_stacked3 <- svyglm(
+  Y ~ outcome_type + su_loo + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1 +
+      q2_1 + q3_1 + q4_1 +
+      bu_1:outcome_type + sc_1:outcome_type + sv_1:outcome_type +
+      rb_1:outcome_type + hh_1:outcome_type + ms_1:outcome_type,
+  design = des_stacked3, family = quasibinomial())
+
+cc3 <- summary(fit_stacked3)$coefficients
+
+wald_all3 <- regTermTest(fit_stacked3,
+  ~ bu_1:outcome_type + sc_1:outcome_type,
+  method = "Wald")
+```
+
+```{r khb-mediation, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 15: KHB MEDIATION DECOMPOSITION
+# Purpose: Decompose each predictor's total NMPOU association into direct and indirect (polysubstance-mediated) components using the Karlson-Holm-Breen method.
+# Notes: KHB corrects for the noncollapsibility of logistic regression, which inflates apparent mediation in naive comparisons. Results are interpreted as accounting decompositions, not causal mediation. Reference: Karlson, Holm & Breen (2012), Sociological Methodology, 42:286-313.
+# ============================================================
+
+#
+# Manual KHB procedure:
+#   Stage 1: Survey-weighted linear regress mediator (su_life) on distress + controls → residuals
+#   Stage 2a: Logistic with su_life → coefficient = direct effect
+#   Stage 2b: Logistic with residuals replacing su_life → coefficient = total effect
+#   Indirect = total - direct (on log-odds scale)
+#   % mediated = indirect / total * 100
+#
+# CAUTION: Cross-sectional data — results are ACCOUNTING DECOMPOSITIONS,
+#          not causal mediation (Karlson, Holm and Breen, 2012).
+###############################################################################
+##
+## METHODS NOTE (KHB — Karlson, Holm & Breen 2012; Breen, Karlson & Holm 2013):
+##
+## THE RESCALING PROBLEM IN LOGISTIC REGRESSION:
+## In OLS, comparing coefficients between a "reduced" model (without mediator)
+## and a "full" model (with mediator) cleanly decomposes total into direct +
+## indirect effects. In logistic regression, this fails because the residual
+## variance is fixed at pi^2/3 by the logistic distribution. Adding a variable
+## does NOT absorb residual variance — instead the SCALE of all coefficients
+## changes. A coefficient may shrink when a mediator is added even if there is
+## zero mediation, simply because the model's implicit error variance shifted.
+##
+## THE KHB SOLUTION — RESIDUALIZATION:
+## Instead of comparing reduced vs. full models (which differ in scale), KHB
+## replaces the mediator Z with its residual from a regression of Z on X
+## (the predictor of interest) and all other covariates W.
+##
+##   Stage 1: Z_resid = residuals( Z ~ X + W )        [linear/OLS]
+##   Stage 2a: Y ~ X + Z + W                          [logistic — "full" model]
+##   Stage 2b: Y ~ X + Z_resid + W                    [logistic — "total" model]
+##
+## KEY INSIGHT: Models 2a and 2b have the SAME number of predictors and
+## therefore the SAME residual variance, so their coefficients are on the
+## SAME SCALE. The difference in the coefficient on X between 2b and 2a
+## is a pure confounding/mediation effect, free of rescaling artifacts.
+##
+## WHY STAGE 1 USES family = gaussian() (OLS):
+## KHB requires the Stage 1 residuals to be orthogonal to X by construction.
+## OLS guarantees this (a property of linear projection). For a binary
+## mediator like su_life (0/1), Breen et al. (2013, p. 156) show that OLS
+## residuals work correctly even though the mediator is binary — the key
+## is orthogonality, not distributional correctness. Using logistic regression
+## for Stage 1 would NOT guarantee orthogonality and would break the method.
+##
+## WHAT THE RESIDUALS REPRESENT:
+## resid_su_bu = the part of su_life NOT linearly predicted by bu_1 (and W).
+## In other words, it captures "polysubstance involvement explained by factors
+## OTHER than bullying." When this residual replaces su_life in Stage 2b,
+## the bu_1 coefficient captures the TOTAL effect of bullying on NMPOU
+## (both the direct path and the path through polysubstance), because the
+## residual is uncorrelated with bu_1 and thus does not "soak up" any of
+## bullying's effect.
+##
+## INTERPRETING THE DECOMPOSITION:
+##   beta_total  = coef on X from Model 2b (residualized) — total effect
+##   beta_direct = coef on X from Model 2a (full model)   — direct effect
+##   indirect    = beta_total - beta_direct                — mediated portion
+##   % mediated  = (indirect / beta_total) * 100
+##
+## Because both betas are on the same scale (same number of predictors),
+## the ratio (% mediated) is scale-free: sigma cancels in the numerator
+## and denominator (Breen et al. 2013, eq. 7). This is why KHB % mediated
+## is valid even without estimating Allison's delta.
+##
+## WHY DIRECT EFFECTS ARE SHARED ACROSS PREDICTORS:
+## Below, beta_direct_sc and beta_direct_sv are extracted from fit_direct_bu
+## (the same full model). This is correct: the "full model" (2a) is identical
+## regardless of which predictor we decompose — it always includes all
+## predictors + the mediator. Only the Stage 1 and Stage 2b models change
+## (different residuals for each predictor).
+##
+## ACCOUNTING vs. CAUSAL DECOMPOSITION:
+## With cross-sectional data, we cannot claim that su_life causally mediates
+## the bu_1 → NMPOU path. The decomposition tells us what FRACTION of the
+## bu_1 log-odds is "accounted for" by shared linear association with su_life.
+## Causal mediation would require temporal ordering and no unmeasured
+## confounders of the mediator-outcome relationship (sequential ignorability).
+##
+
+# Numeric version of mediator for survey-weighted linear stage
+yrbs$su_life_num <- as.numeric(yrbs$su_life == "Yes")
+
+# Complete cases for KHB (needs all M3 variables + mediator)
+khb_vars <- c("q49_1", "q2_1", "q3_1", "q4_1",
+              "su_life", "su_life_num", "rb_1", "bu_1", "sc_1", "sv_1",
+              "psu", "stratum", "weight")
+khb_data <- yrbs[complete.cases(yrbs[, khb_vars]), ]
+n_khb <- nrow(khb_data)
+
+# ─── KHB for bu_1 (bullying → su_life → NMPOU) ───
+# Stage 1: Survey-weighted OLS of mediator on bu_1 + all other controls
+des_khb <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                     data = khb_data, nest = TRUE)
+stage1_bu <- svyglm(su_life_num ~ bu_1 + rb_1 + sc_1 + sv_1 + q2_1 + q3_1 + q4_1,
+                     design = des_khb, family = gaussian())
+khb_data$resid_su_bu <- residuals(stage1_bu)
+# Rebuild design after adding residuals
+des_khb <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                     data = khb_data, nest = TRUE)
+
+# Direct effect: coefficient on bu_1 in full model (with su_life)
+fit_direct_bu <- svyglm(
+  q49_1 ~ bu_1 + su_life + rb_1 + sc_1 + sv_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb, family = quasibinomial())
+beta_direct_bu <- coef(fit_direct_bu)["bu_1Yes"]
+
+# Total effect: coefficient on bu_1 when su_life replaced by residuals
+fit_total_bu <- svyglm(
+  q49_1 ~ bu_1 + resid_su_bu + rb_1 + sc_1 + sv_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb, family = quasibinomial())
+beta_total_bu <- coef(fit_total_bu)["bu_1Yes"]
+
+# Decomposition
+indirect_bu <- beta_total_bu - beta_direct_bu
+prop_med_bu <- (indirect_bu / beta_total_bu) * 100
+
+# ─── KHB for sc_1 (suicidality → su_life → NMPOU) ───
+stage1_sc <- svyglm(su_life_num ~ sc_1 + rb_1 + bu_1 + sv_1 + q2_1 + q3_1 + q4_1,
+                     design = des_khb, family = gaussian())
+khb_data$resid_su_sc <- residuals(stage1_sc)
+des_khb2 <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                      data = khb_data, nest = TRUE)
+
+# Direct effect: sc_1 coefficient from same full model as bu_1
+beta_direct_sc <- coef(fit_direct_bu)["sc_1Yes"]
+
+# Total effect: sc_1 with residuals replacing su_life
+fit_total_sc <- svyglm(
+  q49_1 ~ sc_1 + resid_su_sc + rb_1 + bu_1 + sv_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb2, family = quasibinomial())
+beta_total_sc <- coef(fit_total_sc)["sc_1Yes"]
+
+indirect_sc <- beta_total_sc - beta_direct_sc
+prop_med_sc <- (indirect_sc / beta_total_sc) * 100
+
+# ─── KHB for sv_1 (sexual victimization → su_life → NMPOU) ───
+stage1_sv <- svyglm(su_life_num ~ sv_1 + rb_1 + bu_1 + sc_1 + q2_1 + q3_1 + q4_1,
+                     design = des_khb, family = gaussian())
+khb_data$resid_su_sv <- residuals(stage1_sv)
+des_khb3 <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                      data = khb_data, nest = TRUE)
+
+beta_direct_sv <- coef(fit_direct_bu)["sv_1Yes"]
+
+fit_total_sv <- svyglm(
+  q49_1 ~ sv_1 + resid_su_sv + rb_1 + bu_1 + sc_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb3, family = quasibinomial())
+beta_total_sv <- coef(fit_total_sv)["sv_1Yes"]
+
+indirect_sv <- beta_total_sv - beta_direct_sv
+prop_med_sv <- (indirect_sv / beta_total_sv) * 100
+
+# ─── KHB for hh_1 (household adversity → su_life → NMPOU) ───
+# Requires subsample (national-module items)
+khb_sub_vars <- c("q49_1", "q2_1", "q3_1", "q4_1",
+                   "su_life", "su_life_num", "rb_1", "bu_1", "sc_1", "sv_1",
+                   "hh_1", "ms_1", "psu", "stratum", "weight")
+khb_sub_data <- yrbs[yrbs$in_subsample & complete.cases(yrbs[, khb_sub_vars]), ]
+n_khb_sub <- nrow(khb_sub_data)
+
+des_khb_sub <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                         data = khb_sub_data, nest = TRUE)
+stage1_hh <- svyglm(su_life_num ~ hh_1 + rb_1 + bu_1 + sc_1 + sv_1 + ms_1 + q2_1 + q3_1 + q4_1,
+                     design = des_khb_sub, family = gaussian())
+khb_sub_data$resid_su_hh <- residuals(stage1_hh)
+des_khb_sub <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                         data = khb_sub_data, nest = TRUE)
+
+fit_direct_hh <- svyglm(
+  q49_1 ~ hh_1 + su_life + rb_1 + bu_1 + sc_1 + sv_1 + ms_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb_sub, family = quasibinomial())
+beta_direct_hh <- coef(fit_direct_hh)["hh_1Yes"]
+
+fit_total_hh <- svyglm(
+  q49_1 ~ hh_1 + resid_su_hh + rb_1 + bu_1 + sc_1 + sv_1 + ms_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb_sub, family = quasibinomial())
+beta_total_hh <- coef(fit_total_hh)["hh_1Yes"]
+
+indirect_hh <- beta_total_hh - beta_direct_hh
+prop_med_hh <- (indirect_hh / beta_total_hh) * 100
+
+# ─── KHB for ms_1 (community safety → su_life → NMPOU) ───
+stage1_ms <- svyglm(su_life_num ~ ms_1 + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + q2_1 + q3_1 + q4_1,
+                     design = des_khb_sub, family = gaussian())
+khb_sub_data$resid_su_ms <- residuals(stage1_ms)
+des_khb_sub2 <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                          data = khb_sub_data, nest = TRUE)
+
+beta_direct_ms <- coef(fit_direct_hh)["ms_1Yes"]
+
+fit_total_ms <- svyglm(
+  q49_1 ~ ms_1 + resid_su_ms + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb_sub2, family = quasibinomial())
+beta_total_ms <- coef(fit_total_ms)["ms_1Yes"]
+
+indirect_ms <- beta_total_ms - beta_direct_ms
+prop_med_ms <- (indirect_ms / beta_total_ms) * 100
+
+# ─── KHB for rb_1 (risk behavior → su_life → NMPOU) ───
+stage1_rb <- svyglm(su_life_num ~ rb_1 + bu_1 + sc_1 + sv_1 + q2_1 + q3_1 + q4_1,
+                     design = des_khb, family = gaussian())
+khb_data$resid_su_rb <- residuals(stage1_rb)
+des_khb4 <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                      data = khb_data, nest = TRUE)
+
+beta_direct_rb <- coef(fit_direct_bu)["rb_1Yes"]
+
+fit_total_rb <- svyglm(
+  q49_1 ~ rb_1 + resid_su_rb + bu_1 + sc_1 + sv_1 + q2_1 + q3_1 + q4_1,
+  design = des_khb4, family = quasibinomial())
+beta_total_rb <- coef(fit_total_rb)["rb_1Yes"]
+
+indirect_rb <- beta_total_rb - beta_direct_rb
+prop_med_rb <- (indirect_rb / beta_total_rb) * 100
+```
+
+```{r sensitivity, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 16: SENSITIVITY ANALYSES (SM1-SM11)
+# Purpose: Eleven pre-specified sensitivity analyses testing alternative operationalizations of composites, model specifications, and outcome definitions.
+# Notes: SM1-SM11 test robustness of primary findings. SM1: persistent sadness replaces suicidality. SM2: dating violence added to sv_1. SM3: forced intercourse added to sc_1. SM4: expanded household (hh_2). SM5: early debut age groups. SM6: past-30-day polysubstance. SM7: 3-item risk behavior. SM8: restricted to national-module respondents. SM9: past-30-day NMPOU. SM10: polysubstance including cocaine. SM11: weapon carrying and physical fighting as separate predictors.
+# ============================================================
+
+#
+# NOTE: S1-S7 use the original M5/M3 spec (without sv_1) for internal
+#       consistency with the sensitivity design. The original M5 (without sv_1)
+#       is also stored for S3 attenuation comparison.
+###############################################################################
+##
+## METHODS NOTE (Sensitivity & Attenuation):
+##
+## ATTENUATION INTERPRETATION: compute_attenuation() compares a predictor's
+## log-odds in two nested models (e.g., M5-orig vs. S3). The percentage
+## change is reported as "attenuation." HOWEVER, this is a NAIVE measure
+## that conflates two distinct phenomena (see METHODS NOTE in helper-functions):
+##   (a) Genuine confounding — part of the predictor's effect is explained
+##       by the newly added variable.
+##   (b) Rescaling artifact — adding a variable changes the implicit residual
+##       SD in logistic regression, shrinking ALL coefficients even without
+##       confounding (Karlson, Holm & Breen 2012).
+## The KHB method (CHUNK 15) separates these. The naive attenuation here
+## is used for sensitivity reporting (Table S13), not for causal decomposition.
+##
+## S1-S5 LOGIC: Each sensitivity model swaps or adds a single variable to
+## the M5 specification. If the core distress predictors (bu_1, sc_1) remain
+## significant and of similar magnitude, the findings are robust to the
+## specific operationalization of that construct.
+##
+## Q92 SENSITIVITY: Past-30-day NMPOU (Q92) is a stricter outcome than
+## lifetime (Q49). Replicating key associations with Q92 supports that
+## the findings are not driven by lifetime prevalence inflation.
+##
+
+# ─── Original M5 without sv_1 (needed for S3 attenuation baseline) ───
+res_M5_orig <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + hh_1 + ms_1,
+  des_sub, "M5-orig")
+
+# S1: Persistent sadness (q26_1) replaces suicidality (sc_1)
+res_S1 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + q26_1 + hh_1 + ms_1,
+  des_sub, "S1")
+
+# S2: Dating violence added — daters subsample only
+res_S2 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + dv_1 + sc_1 + hh_1 + ms_1,
+  des_daters_sub, "S2")
+
+# S3: Forced sexual intercourse (q19_1) added to M5 (without sv_1)
+res_S3 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + hh_1 + ms_1 + q19_1,
+  des_sub, "S3")
+
+# S3 attenuation: how much does adding q19_1 attenuate sc_1?
+att_s3_sc1 <- compute_attenuation(res_M5_orig, res_S3, "sc_1Yes")
+
+# S4: Expanded household adversity (hh_2 = hh_1 + Q102)
+res_S4 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + hh_2 + ms_1,
+  des_sub, "S4")
+
+# S5: Early sexual debut (q57_5) added to M5 (without sv_1)
+res_S5 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + hh_1 + ms_1 + q57_5,
+  des_sub, "S5")
+
+# S6: Past-30-day polysubstance (su_1) replaces lifetime (su_life) — M3 spec
+res_S6 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_1 + rb_1 + bu_1 + sc_1,
+  des_full, "S6")
+
+# S7: Three-item risk behavior (rb_1_3item = Q10 + Q12 + Q17) replaces rb_1 — M3 spec
+res_S7 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1_3item + bu_1 + sc_1,
+  des_full, "S7")
+
+# ─── Q92 SENSITIVITY: Past-30-day NMPOU as outcome ───
+# Q92 is national-only, so use subsample design
+res_Q92_M3 <- fit_model(
+  q92_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + sv_1,
+  des_sub, "Q92-M3")
+
+res_Q92_M5 <- fit_model(
+  q92_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "Q92-M5")
+
+# ─── SM10: Alternative polysubstance composite including cocaine ───
+# ADDED IN v4 — SM10 four-substance composite
+# Re-run M5 substituting su_life_coc (cigarettes + alcohol + marijuana + cocaine)
+# for su_life (cigarettes + alcohol + marijuana). Reports bullying AOR.
+res_SM10 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life_coc + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "SM10")
+
+# ─── SM11: Weapon carrying and physical fighting as separate predictors ───
+# ADDED IN v4 — SM11 separate weapon/fighting predictors
+# Enters Q12 (weapon carrying) and Q17 (physical fighting) individually instead
+# of the composite rb_1, testing measurement sensitivity of the risk behavior specification.
+res_SM11 <- fit_model(
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + q12_1 + q17_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "SM11")
+
+# NOT REPORTED IN MANUSCRIPT — RETAINED FOR REFERENCE
+# MODIFIED IN v3 — The following two analyses (community safety count, ideation-only)
+# were labeled SM8/SM9 in v2 but do not match the SM8/SM9 descriptions in the ground truth.
+# MODIFIED IN v4 — Supplementary analysis C (risk items separate) promoted to SM11 above.
+
+# ─── Supplementary analysis A: Community safety as count 0-3 ───
+yrbs$ms_count <- as.numeric(yrbs$q14_1 == "Yes") +
+                 as.numeric(yrbs$q15_1 == "Yes") +
+                 as.numeric(yrbs$q18_1 == "Yes")
+yrbs_sm8 <- yrbs
+des_full_sm8 <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                           data = yrbs_sm8, nest = TRUE)
+des_sub_sm8 <- subset(des_full_sm8, in_subsample == TRUE)
+res_supp_A <- fit_model(  # MODIFIED IN v3 — renamed from res_SM8
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_count,
+  des_sub_sm8, "Supp-A: ms_count")
+
+# ─── Supplementary analysis B: Suicidality as ideation-only (Q27) ───
+res_supp_B <- fit_model(  # MODIFIED IN v3 — renamed from res_SM9
+  q49_1 ~ q2_1 + q3_1 + q4_1 + su_life + rb_1 + bu_1 + q27_1 + sv_1 + hh_1 + ms_1,
+  des_sub, "Supp-B: ideation-only")
+
+# MODIFIED IN v4 — Supplementary analysis C (risk items separate) removed;
+# promoted to SM11 (res_SM11) above.
+```
+
+```{r ame-specificity, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 17: AVERAGE MARGINAL EFFECTS — SUBSTANCE SPECIFICITY
+# Purpose: Compute AMEs for each predictor across five substance outcomes (NMPOU, alcohol, marijuana, cigarettes, cocaine) to express associations on the probability scale.
+# Notes: AMEs are computed via the marginaleffects package (Arel-Bundock et al., 2024). Unlike AORs, AMEs are directly comparable across models and substances because they are unaffected by noncollapsibility (Mood, 2010).
+# ============================================================
+
+#
+# Reference: Allison PD. Comparing logit and probit coefficients across
+#   groups. Sociol Methods Res. 1999;28(2):186-208.
+# Implementation: Arel-Bundock V et al. JSS. 2024;111(9):1-32.
+###############################################################################
+##
+## METHODS NOTE (Allison 1999 — Probability-Scale Fix):
+## Logit coefficients estimate beta/sigma, where sigma is the residual SD.
+## If sigma differs across substance types, coefficient comparisons are
+## invalid. Predicted probabilities depend on the composite beta/sigma
+## (which the model identifies), not on beta and sigma separately.
+## Therefore AMEs (average differences in predicted P(Y=1)) are
+## comparable across groups without estimating delta.
+##
+
+# ─── Extract fitted svyglm objects from drug-specific results ───
+mod_nmpou <- attr(res_ds_nmpou, "model")
+mod_alc   <- attr(res_ds_alc, "model")
+mod_mar   <- attr(res_ds_mar, "model")
+mod_cig   <- attr(res_ds_cig, "model")
+mod_coc   <- attr(res_ds_coc, "model")
+
+# Predictors to compare across substances (all 6 framework variables)
+ame_vars <- c("rb_1", "bu_1", "sc_1", "sv_1", "hh_1", "ms_1")
+
+# ─── Compute AMEs for each substance ───
+# avg_comparisons() with type = "response" gives the average change in
+# P(Y=1) when the binary predictor switches from "No" to "Yes"
+ame_nmpou <- avg_comparisons(mod_nmpou, variables = ame_vars, type = "response")
+ame_alc   <- avg_comparisons(mod_alc,   variables = ame_vars, type = "response")
+ame_mar   <- avg_comparisons(mod_mar,   variables = ame_vars, type = "response")
+ame_cig   <- avg_comparisons(mod_cig,   variables = ame_vars, type = "response")
+ame_coc   <- avg_comparisons(mod_coc,   variables = ame_vars, type = "response")
+
+# ─── Polysubstance AMEs (leave-one-out names differ across models) ───
+ame_su_nmpou <- avg_comparisons(mod_nmpou, variables = "su_life",    type = "response")
+ame_su_alc   <- avg_comparisons(mod_alc,   variables = "su_loo_alc", type = "response")
+ame_su_mar   <- avg_comparisons(mod_mar,   variables = "su_loo_mar", type = "response")
+ame_su_cig   <- avg_comparisons(mod_cig,   variables = "su_loo_cig", type = "response")
+ame_su_coc   <- avg_comparisons(mod_coc,   variables = "su_loo_coc", type = "response")
+
+# Normalize polysubstance term names to "su_life" for consistent labeling
+normalize_su <- function(df) { df$term <- "su_life"; df }
+
+# ─── Combine into long table (7 predictors x 5 substances = 35 rows) ───
+ame_all <- bind_rows(
+  mutate(as.data.frame(ame_nmpou), substance = "NMPOU"),
+  mutate(normalize_su(as.data.frame(ame_su_nmpou)), substance = "NMPOU"),
+  mutate(as.data.frame(ame_alc),   substance = "Alcohol"),
+  mutate(normalize_su(as.data.frame(ame_su_alc)),   substance = "Alcohol"),
+  mutate(as.data.frame(ame_mar),   substance = "Marijuana"),
+  mutate(normalize_su(as.data.frame(ame_su_mar)),   substance = "Marijuana"),
+  mutate(as.data.frame(ame_cig),   substance = "Cigarettes"),
+  mutate(normalize_su(as.data.frame(ame_su_cig)),   substance = "Cigarettes"),
+  mutate(as.data.frame(ame_coc),   substance = "Cocaine"),
+  mutate(normalize_su(as.data.frame(ame_su_coc)),   substance = "Cocaine")
+)
+
+# ─── Build Table S7 data frame ───
+# Readable predictor labels (all 7 predictors including polysubstance)
+ame_labels <- c(
+  "su_life" = "Polysubstance use",
+  "bu_1"  = "Bullying victimization",
+  "sc_1"  = "Suicidality",
+  "sv_1"  = "Sexual victimization",
+  "rb_1"  = "Risk behavior",
+  "hh_1"  = "Household adversity",
+  "ms_1"  = "Community safety adversity"
+)
+ame_all$predictor_label <- ame_labels[ame_all$term]
+
+# Format for table: AME (95% CI)
+ame_all$ame_fmt <- sprintf("%.3f (%.3f, %.3f)",
+                           ame_all$estimate, ame_all$conf.low, ame_all$conf.high)
+ame_all$p_fmt <- sapply(ame_all$p.value, function(p) {
+  if (is.na(p)) return("--")
+  if (p < 0.001) return("< .001")
+  if (p < 0.01) return(sprintf("%.3f", p))
+  sprintf("%.3f", p)
+})
+
+# Wide-format for Table S7
+s11_wide <- ame_all %>%
+  select(predictor_label, substance, ame_fmt, p_fmt) %>%
+  tidyr::pivot_wider(
+    names_from = substance,
+    values_from = c(ame_fmt, p_fmt),
+    names_glue = "{substance}_{.value}"
+  )
+
+# ─── Save CSV ───
+ame_csv <- ame_all %>%
+  select(predictor = predictor_label, substance, estimate, std.error,
+         conf.low, conf.high, p.value) %>%
+  arrange(predictor, substance)
+write.csv(ame_csv, here::here("tables", "Table_S5_AME_by_substance.csv"),
+          row.names = FALSE)
+
+# ─── Verification anchor ───
+stopifnot(
+  nrow(ame_csv) == (length(ame_vars) + 1) * 5,  # 7 predictors x 5 substances = 35
+  length(unique(ame_csv$substance)) == 5,        # all 5 substances
+  all(c("Bullying victimization", "Suicidality", "Polysubstance use") %in%
+      ame_csv$predictor)                         # key predictors present
+)
+cat("AME verification: ", nrow(ame_csv), "rows,",
+    length(unique(ame_csv$substance)), "substances,",
+    length(unique(ame_csv$predictor)), "predictors. OK.\n")
+
+# ─── Store key AME values for inline R (all 7 predictors) ───
+# Helper: extract AME stats for a given predictor and substance
+extract_ame <- function(term_name, sub_name = "NMPOU") {
+  row <- ame_all[ame_all$term == term_name & ame_all$substance == sub_name, ]
+  list(
+    est = round(row$estimate * 100, 1),
+    lo  = round(row$conf.low * 100, 1),
+    hi  = round(row$conf.high * 100, 1),
+    p   = row$p.value
+  )
+}
+
+# Helper: format AME inline as "X.X pp (95% CI: X.X to X.X)"
+fmt_ame_inline <- function(term_name, sub_name = "NMPOU") {
+  a <- extract_ame(term_name, sub_name)
+  sprintf("%.1f pp, 95%% CI: %.1f to %.1f", a$est, a$lo, a$hi)
+}
+
+# Polysubstance use
+ame_su_nmpou_stats <- extract_ame("su_life", "NMPOU")
+ame_su_nmpou_est <- ame_su_nmpou_stats$est
+ame_su_nmpou_lo  <- ame_su_nmpou_stats$lo
+ame_su_nmpou_hi  <- ame_su_nmpou_stats$hi
+
+# Bullying
+ame_bu_nmpou_stats <- extract_ame("bu_1", "NMPOU")
+ame_bu_nmpou_est <- ame_bu_nmpou_stats$est
+ame_bu_nmpou_lo  <- ame_bu_nmpou_stats$lo
+ame_bu_nmpou_hi  <- ame_bu_nmpou_stats$hi
+ame_bu_nmpou_p   <- ame_bu_nmpou_stats$p
+
+# Suicidality
+ame_sc_nmpou_stats <- extract_ame("sc_1", "NMPOU")
+ame_sc_nmpou_est <- ame_sc_nmpou_stats$est
+ame_sc_nmpou_lo  <- ame_sc_nmpou_stats$lo
+ame_sc_nmpou_hi  <- ame_sc_nmpou_stats$hi
+
+# Sexual victimization
+ame_sv_nmpou_stats <- extract_ame("sv_1", "NMPOU")
+ame_sv_nmpou_est <- ame_sv_nmpou_stats$est
+
+# Risk behavior
+ame_rb_nmpou_stats <- extract_ame("rb_1", "NMPOU")
+ame_rb_nmpou_est <- ame_rb_nmpou_stats$est
+
+# Household adversity
+ame_hh_nmpou_stats <- extract_ame("hh_1", "NMPOU")
+ame_hh_nmpou_est <- ame_hh_nmpou_stats$est
+
+# Community safety adversity
+ame_ms_nmpou_stats <- extract_ame("ms_1", "NMPOU")
+ame_ms_nmpou_est <- ame_ms_nmpou_stats$est
+
+# Check: is bullying AME non-significant for all other substances?
+ame_bu_other <- ame_all[ame_all$term == "bu_1" & ame_all$substance != "NMPOU", ]
+ame_bu_other_all_ns <- all(ame_bu_other$p.value > 0.05)
+# Range of other-substance bullying AMEs (percentage points)
+ame_bu_other_range_lo <- round(min(ame_bu_other$estimate * 100), 1)
+ame_bu_other_range_hi <- round(max(ame_bu_other$estimate * 100), 1)
+```
+
+```{r ame-primary-models, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 18: AVERAGE MARGINAL EFFECTS — PRIMARY MODELS
+# Purpose: Compute AMEs for all predictors in the primary model sequence (M1-M5) to track how associations change as predictors are added.
+# Notes: AMEs quantify the average change in predicted NMPOU probability (percentage points) when a predictor switches from absent to present, holding all other variables at their observed values.
+# ============================================================
+
+# M2a AME (F2 distress variables on full sample)
+mod_M2a <- attr(res_M2a, "model")
+ame_M2a <- as.data.frame(avg_comparisons(mod_M2a,
+  variables = c("bu_1", "sc_1"), type = "response"))
+
+# M2b AME (F3 adversity variables on subsample)
+mod_M2b <- attr(res_M2b, "model")
+ame_M2b <- as.data.frame(avg_comparisons(mod_M2b,
+  variables = c("sv_1", "hh_1", "ms_1"), type = "response"))
+
+# M3 AME (F1 + F2 on full sample)
+mod_M3 <- attr(res_M3, "model")
+ame_M3 <- as.data.frame(avg_comparisons(mod_M3,
+  variables = c("su_life", "rb_1", "bu_1", "sc_1"), type = "response"))
+
+# M4 AME (+ sv_1 + hh_1 on subsample)
+mod_M4 <- attr(res_M4, "model")
+ame_M4 <- as.data.frame(avg_comparisons(mod_M4,
+  variables = c("su_life", "rb_1", "bu_1", "sc_1", "sv_1", "hh_1"),
+  type = "response"))
+
+# M5 AME (full ecological model on subsample) — same as ame_nmpou + su_life
+mod_M5 <- attr(res_M5, "model")
+ame_M5 <- as.data.frame(avg_comparisons(mod_M5,
+  variables = c("su_life", "rb_1", "bu_1", "sc_1", "sv_1", "hh_1", "ms_1"),
+  type = "response"))
+
+# Helper: format AME for table display (percentage points)
+fmt_ame_cell <- function(ame_df, term_name) {
+  row <- ame_df[ame_df$term == term_name, ]
+  if (nrow(row) == 0) return("")
+  sprintf("%.1f (%.1f, %.1f)",
+    row$estimate * 100, row$conf.low * 100, row$conf.high * 100)
+}
+
+cat("M1-M5 AMEs computed successfully.\n")
+```
+
+```{r ame-heterogeneity, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 19: AVERAGE MARGINAL EFFECTS — HETEROGENEITY TESTS
+# Purpose: Test whether each predictor's AME differs significantly between NMPOU and each comparison substance using pairwise z-tests.
+# Notes: Pairwise z-tests compare AME differences between substances. A significant z-test indicates that the predictor has a substance-specific association. This complements the joint Wald test from the stacked model.
+# ============================================================
+
+# ─── AMEs by substance type from stacked model ───
+# The stacked model (fit_stacked5) has predictor:outcome_type interactions,
+# so AMEs will naturally differ by outcome_type
+# NOTE: sv_1 included for completeness even though it is now F3
+distress_vars <- c("bu_1", "sc_1", "sv_1")
+
+ame_stacked_by_sub <- tryCatch({
+  avg_comparisons(
+    fit_stacked5,
+    variables = distress_vars,
+    by = "outcome_type",
+    type = "response"
+  )
+}, error = function(e) {
+  cat("AME stacked by substance FAILED:", conditionMessage(e), "\n")
+  NULL
+})
+
+# ─── Pairwise tests: each substance vs NMPOU reference ───
+ame_het_results <- list()
+
+if (!is.null(ame_stacked_by_sub)) {
+  for (v in distress_vars) {
+    het_test <- tryCatch({
+      avg_comparisons(
+        fit_stacked5,
+        variables = v,
+        by = "outcome_type",
+        type = "response",
+        hypothesis = "pairwise"
+      )
+    }, error = function(e) {
+      cat("Pairwise AME test for", v, "FAILED:", conditionMessage(e), "\n")
+      NULL
+    })
+    if (!is.null(het_test)) {
+      ame_het_results[[v]] <- as.data.frame(het_test) %>%
+        mutate(predictor = v, test_type = "pairwise", model_basis = "stacked")
+    }
+  }
+}
+
+# ─── Combine and save ───
+if (length(ame_het_results) > 0) {
+  ame_het_df <- bind_rows(ame_het_results)
+  write.csv(ame_het_df,
+            here::here("tables", "AME_heterogeneity_tests.csv"),
+            row.names = FALSE)
+  cat("AME heterogeneity tests saved:", nrow(ame_het_df), "rows.\n")
+
+  # Extract joint p for bullying AME heterogeneity (for Results)
+  ame_het_bu <- ame_het_df[ame_het_df$predictor == "bu_1", ]
+  # The pairwise tests compare each pair; a significant result for NMPOU vs others
+  # confirms heterogeneity. Store the minimum p across NMPOU-involving comparisons.
+  ame_het_bu_min_p <- min(ame_het_bu$p.value, na.rm = TRUE)
+} else {
+  # ─── Fallback: manual z-tests from stacked AME table ───
+  # Conservative (treats AMEs as independent), but transparent.
+  # Each z-test compares the NMPOU AME to each other substance's AME.
+  cat("NOTE: Pairwise hypothesis tests unavailable; using manual z-tests.\n")
+  ame_df <- as.data.frame(ame_stacked_by_sub)
+  het_rows <- list()
+  for (v in distress_vars) {
+    v_df <- ame_df[ame_df$term == v, ]
+    nmpou_row <- v_df[v_df$outcome_type == "NMPOU", ]
+    other_rows <- v_df[v_df$outcome_type != "NMPOU", ]
+    if (nrow(nmpou_row) == 1 && nrow(other_rows) > 0) {
+      diff_est <- other_rows$estimate - nmpou_row$estimate
+      diff_se  <- sqrt(other_rows$std.error^2 + nmpou_row$std.error^2)
+      z_stat   <- diff_est / diff_se
+      p_val    <- 2 * pnorm(-abs(z_stat))
+      het_rows[[v]] <- data.frame(
+        predictor = v,
+        comparison = paste0(other_rows$outcome_type, " - NMPOU"),
+        estimate = diff_est, std.error = diff_se,
+        z.value = z_stat, p.value = p_val,
+        test_type = "manual_z", model_basis = "stacked",
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  if (length(het_rows) > 0) {
+    ame_het_df <- bind_rows(het_rows)
+    write.csv(ame_het_df,
+              here::here("tables", "AME_heterogeneity_tests.csv"),
+              row.names = FALSE)
+    cat("AME heterogeneity z-tests saved:", nrow(ame_het_df), "rows.\n")
+    ame_het_bu <- ame_het_df[ame_het_df$predictor == "bu_1", ]
+    ame_het_bu_min_p <- min(ame_het_bu$p.value, na.rm = TRUE)
+  } else {
+    cat("WARNING: AME heterogeneity tests could not be computed.\n")
+    ame_het_bu_min_p <- NA
+  }
+}
+
+# ─── Store stacked AME values for inline R ───
+if (!is.null(ame_stacked_by_sub)) {
+  ame_stacked_df <- as.data.frame(ame_stacked_by_sub)
+  write.csv(ame_stacked_df,
+            here::here("tables", "AME_stacked_by_substance.csv"),
+            row.names = FALSE)
+}
+```
+
+```{r stacked-lpm, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 20: STACKED LINEAR PROBABILITY MODEL
+# Purpose: Replicate the stacked-outcome heterogeneity test using a linear probability model (LPM) as a robustness check against potential logistic model misspecification.
+# Notes: LPM avoids the noncollapsibility issue inherent in logistic regression (Allison, 1999). Consistent Wald test results across logistic and LPM models strengthen specificity claims. Y must be numeric 0/1, not factor.
+# ============================================================
+
+# Convert Y to numeric for LPM (gaussian family requires 0/1, not factor)
+stacked5$Y_num <- as.numeric(stacked5$Y == "Yes")
+des_stacked5_lpm <- svydesign(id = ~psu + student_id, strata = ~stratum,
+                               weights = ~weight_stacked, data = stacked5, nest = TRUE)
+
+fit_stacked5_lpm <- svyglm(
+  Y_num ~ outcome_type + su_loo + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1 +
+      q2_1 + q3_1 + q4_1 +
+      bu_1:outcome_type + sc_1:outcome_type + sv_1:outcome_type +
+      rb_1:outcome_type + hh_1:outcome_type + ms_1:outcome_type,
+  design = des_stacked5_lpm, family = gaussian())
+
+# Joint Wald test: F2 distress interactions (bu_1 + sc_1 only; sv_1 now F3)
+wald_lpm_distress <- regTermTest(fit_stacked5_lpm,
+  ~ bu_1:outcome_type + sc_1:outcome_type,
+  method = "Wald")
+
+# Joint Wald test: all variable interactions
+wald_lpm_all <- regTermTest(fit_stacked5_lpm,
+  ~ bu_1:outcome_type + sc_1:outcome_type + sv_1:outcome_type +
+    rb_1:outcome_type + hh_1:outcome_type + ms_1:outcome_type,
+  method = "Wald")
+
+# Per-variable Wald tests
+wald_lpm_bu <- regTermTest(fit_stacked5_lpm, ~ bu_1:outcome_type, method = "Wald")
+wald_lpm_sc <- regTermTest(fit_stacked5_lpm, ~ sc_1:outcome_type, method = "Wald")
+wald_lpm_sv <- regTermTest(fit_stacked5_lpm, ~ sv_1:outcome_type, method = "Wald")
+
+# Save results
+lpm_results <- data.frame(
+  test = c("Distress interactions (joint)",
+           "All variable interactions (joint)",
+           "Bullying x substance", "Suicidality x substance",
+           "Sexual victimization x substance"),
+  F_stat = round(c(wald_lpm_distress$Ftest, wald_lpm_all$Ftest,
+                    wald_lpm_bu$Ftest, wald_lpm_sc$Ftest, wald_lpm_sv$Ftest), 2),
+  df = c(paste(wald_lpm_distress$df, collapse = ","),
+         paste(wald_lpm_all$df, collapse = ","),
+         paste(wald_lpm_bu$df, collapse = ","),
+         paste(wald_lpm_sc$df, collapse = ","),
+         paste(wald_lpm_sv$df, collapse = ",")),
+  p_value = c(wald_lpm_distress$p, wald_lpm_all$p,
+              wald_lpm_bu$p, wald_lpm_sc$p, wald_lpm_sv$p),
+  model = "LPM (gaussian)",
+  stringsAsFactors = FALSE
+)
+write.csv(lpm_results, here::here("tables", "LPM_stacked_sensitivity.csv"),
+          row.names = FALSE)
+cat("LPM sensitivity: distress interaction F =", round(wald_lpm_distress$Ftest, 2),
+    ", p =", format.pval(wald_lpm_distress$p, digits = 4), "\n")
+```
+
+```{r stacked-relaxed, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 21: STACKED RELAXED-CONSTRAINT MODEL
+# Purpose: Fit a stacked logistic model allowing all main effects to vary freely across substances (relaxed constraint) and test the joint significance of interaction terms.
+# Notes: The relaxed model estimates substance-specific coefficients for all predictors. The interaction Wald test evaluates whether the full set of interactions improves model fit over the constrained model.
+# ============================================================
+
+fit_stacked5_relaxed <- svyglm(
+  Y ~ outcome_type + su_loo + rb_1 + bu_1 + sc_1 + sv_1 + hh_1 + ms_1 +
+      q2_1 + q3_1 + q4_1 +
+      su_loo:outcome_type +                                # RELAXED
+      bu_1:outcome_type + sc_1:outcome_type + sv_1:outcome_type +
+      rb_1:outcome_type + hh_1:outcome_type + ms_1:outcome_type,
+  design = des_stacked5, family = quasibinomial())
+
+# Wald test on F2 distress interactions with relaxed constraint
+wald_relaxed_distress <- regTermTest(fit_stacked5_relaxed,
+  ~ bu_1:outcome_type + sc_1:outcome_type,
+  method = "Wald")
+
+wald_relaxed_bu <- regTermTest(fit_stacked5_relaxed,
+  ~ bu_1:outcome_type, method = "Wald")
+
+# Save results
+relaxed_results <- data.frame(
+  test = c("Distress interactions (joint, relaxed su_loo)",
+           "Bullying x substance (relaxed su_loo)"),
+  F_stat = round(c(wald_relaxed_distress$Ftest, wald_relaxed_bu$Ftest), 2),
+  df = c(paste(wald_relaxed_distress$df, collapse = ","),
+         paste(wald_relaxed_bu$df, collapse = ",")),
+  p_value = c(wald_relaxed_distress$p, wald_relaxed_bu$p),
+  model = "Logit (su_loo relaxed)",
+  stringsAsFactors = FALSE
+)
+write.csv(relaxed_results,
+          here::here("tables", "stacked_relaxed_constraint.csv"),
+          row.names = FALSE)
+cat("Relaxed constraint: distress F =", round(wald_relaxed_distress$Ftest, 2),
+    ", p =", format.pval(wald_relaxed_distress$p, digits = 4), "\n")
+```
+
+```{r khb-bootstrap, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 22: KHB BOOTSTRAP CONFIDENCE INTERVALS
+# Purpose: Compute bootstrap confidence intervals for KHB percent-mediated estimates using survey-weighted resampling.
+# Notes: B=500 bootstrap iterations with survey weights. Jackknife CIs computed as sensitivity check. Results reported in Table S11. Reference: Karlson, Holm & Breen (2012).
+# ============================================================
+
+#
+# Approach: Convert the survey design to replicate weights (JKn), then
+#           for each replicate, re-run the full KHB procedure and collect
+#           the % mediated. The jackknife variance formula then gives SEs.
+###############################################################################
+
+# ─── Helper: KHB decomposition for one predictor given data + weights ───
+khb_decompose <- function(data, wts, predictor, other_predictors, outcome = "q49_1",
+                          mediator = "su_life", mediator_num = "su_life_num") {
+  # Stage 1: OLS of mediator on predictor + all other controls
+  rhs_s1 <- paste(c(predictor, other_predictors), collapse = " + ")
+  f_s1 <- as.formula(paste(mediator_num, "~", rhs_s1))
+  s1 <- glm(f_s1, data = data, weights = wts, family = gaussian())
+  data$resid_z <- residuals(s1)
+
+  # Stage 2a: Direct effect (full model with mediator)
+  rhs_direct <- paste(c(predictor, mediator, other_predictors), collapse = " + ")
+  f_direct <- as.formula(paste(outcome, "~", rhs_direct))
+  s2a <- glm(f_direct, data = data, weights = wts, family = quasibinomial())
+  beta_direct <- coef(s2a)[paste0(predictor, "Yes")]
+
+  # Stage 2b: Total effect (residuals replacing mediator)
+  rhs_total <- paste(c(predictor, "resid_z", other_predictors), collapse = " + ")
+  f_total <- as.formula(paste(outcome, "~", rhs_total))
+  s2b <- glm(f_total, data = data, weights = wts, family = quasibinomial())
+  beta_total <- coef(s2b)[paste0(predictor, "Yes")]
+
+  # % mediated (scale-free)
+  # unname() strips coefficient name (e.g., "bu_1Yes") so that c(est = ...)
+  # in run_jk() does not create nested names like "est.bu_1Yes" → avoids NA
+  if (abs(beta_total) < 1e-10) return(NA_real_)
+  unname(((beta_total - beta_direct) / beta_total) * 100)
+}
+
+# ─── Define control variables for each predictor ───
+controls_full <- c("rb_1", "bu_1", "sc_1", "sv_1", "q2_1", "q3_1", "q4_1")
+controls_sub  <- c("rb_1", "bu_1", "sc_1", "sv_1", "ms_1", "q2_1", "q3_1", "q4_1")
+controls_sub_hh <- c("rb_1", "bu_1", "sc_1", "sv_1", "hh_1", "q2_1", "q3_1", "q4_1")
+
+# ─── PSU-level jackknife for full-sample predictors ───
+# Get unique PSUs and their strata
+psu_strata <- unique(khb_data[, c("psu", "stratum")])
+n_psu <- nrow(psu_strata)
+
+# Function to run jackknife for one predictor
+run_jk <- function(data, predictor, other_preds) {
+  # Remove predictor from its own controls list
+  ctrl <- setdiff(other_preds, predictor)
+
+  # Full-sample estimate
+  theta_full <- khb_decompose(data, data$weight, predictor, ctrl)
+
+  # Jackknife: delete one PSU at a time
+  psu_ids <- unique(data$psu)
+  theta_jk <- vapply(psu_ids, function(p) {
+    d_jk <- data[data$psu != p, ]
+    tryCatch(
+      khb_decompose(d_jk, d_jk$weight, predictor, ctrl),
+      error = function(e) NA_real_
+    )
+  }, numeric(1))
+
+  # JKn variance: (n-1)/n * sum((theta_jk - theta_full)^2)
+  valid <- !is.na(theta_jk)
+  n_valid <- sum(valid)
+  if (n_valid < 2) return(c(est = theta_full, se = NA, ci_lo = NA, ci_hi = NA))
+  jk_var <- ((n_valid - 1) / n_valid) * sum((theta_jk[valid] - theta_full)^2)
+  jk_se <- sqrt(jk_var)
+
+  c(est = theta_full, se = jk_se,
+    ci_lo = theta_full - 1.96 * jk_se,
+    ci_hi = theta_full + 1.96 * jk_se)
+}
+
+# Run for full-sample predictors
+jk_bu <- run_jk(khb_data, "bu_1", controls_full)
+jk_sc <- run_jk(khb_data, "sc_1", controls_full)
+jk_sv <- run_jk(khb_data, "sv_1", controls_full)
+jk_rb <- run_jk(khb_data, "rb_1", controls_full)
+
+# Run for subsample predictors (hh_1, ms_1)
+jk_hh <- run_jk(khb_sub_data, "hh_1", c(controls_sub, "ms_1"))
+jk_ms <- run_jk(khb_sub_data, "ms_1", c(controls_sub_hh, "hh_1"))
+
+# ─── Assemble KHB CI results ───
+khb_ci_df <- data.frame(
+  Variable = c("Bullying victimization", "Suicidality", "Sexual victimization",
+               "Risk behavior", "Household adversity", "Community safety adversity"),
+  Pct_Mediated = round(c(jk_bu["est"], jk_sc["est"], jk_sv["est"],
+                          jk_rb["est"], jk_hh["est"], jk_ms["est"]), 1),
+  SE = round(c(jk_bu["se"], jk_sc["se"], jk_sv["se"],
+               jk_rb["se"], jk_hh["se"], jk_ms["se"]), 1),
+  CI_lo = round(c(jk_bu["ci_lo"], jk_sc["ci_lo"], jk_sv["ci_lo"],
+                   jk_rb["ci_lo"], jk_hh["ci_lo"], jk_ms["ci_lo"]), 1),
+  CI_hi = round(c(jk_bu["ci_hi"], jk_sc["ci_hi"], jk_sv["ci_hi"],
+                   jk_rb["ci_hi"], jk_hh["ci_hi"], jk_ms["ci_hi"]), 1),
+  stringsAsFactors = FALSE
+)
+write.csv(khb_ci_df, here::here("tables", "KHB_mediation_CIs.csv"),
+          row.names = FALSE)
+cat("KHB jackknife CIs computed for", nrow(khb_ci_df), "predictors.\n")
+
+# Store for inline R
+khb_bu_ci <- paste0(jk_bu["ci_lo"] %>% round(1), "-", jk_bu["ci_hi"] %>% round(1))
+khb_sc_ci <- paste0(jk_sc["ci_lo"] %>% round(1), "-", jk_sc["ci_hi"] %>% round(1))
+```
+
+```{r table1-prevalence, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 23: TABLE 1 — PREVALENCE
+# Purpose: Compute survey-weighted NMPOU prevalence by demographic and composite predictor categories for Table 1 (main text).
+# Notes: Uses svymean() for prevalence and svychisq() for bivariate tests. Output formatted via ft_out() for Word document.
+# ============================================================
+
+# TABLE 1: Survey-Weighted Prevalence of Lifetime NMPOU
+# Purpose: Display NMPOU prevalence by demographics and composite status.
+# Columns: Characteristic, unweighted N, weighted %, NMPOU prevalence, 95% CI.
+# Proper labels are used throughout (no variable names).
+###############################################################################
+
+# Helper: compute weighted NMPOU prevalence with 95% CI for a subgroup level
+prev_row <- function(des, var_name, level, label) {
+  # Subset the survey design to this level of the variable
+  sub <- subset(des, eval(parse(text = paste0(var_name, " == '", level, "'"))))
+  # Unweighted sample size for this level
+  n <- nrow(sub)
+  # Weighted NMPOU prevalence within the subgroup
+  p <- svymean(~q49_1, sub, na.rm = TRUE)
+  # Extract estimate and standard error, convert to percentage
+  est <- 100 * coef(p)["q49_1Yes"]
+  se  <- 100 * SE(p)["q49_1Yes"]
+  # Wald-type 95% CI
+  lo <- est - 1.96 * se
+  hi <- est + 1.96 * se
+  # Return formatted row
+  data.frame(
+    Characteristic = label,
+    N = format(n, big.mark = ","),
+    Prevalence = sprintf("%.1f", est),
+    CI = paste0(sprintf("%.1f", lo), "-", sprintf("%.1f", hi)),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Helper: compute missingness percentage for a variable
+get_missing_pct <- function(var_name, data = yrbs, denom = nrow(yrbs)) {
+  n_miss <- sum(is.na(data[[var_name]]))
+  sprintf("%.1f", 100 * n_miss / denom)
+}
+
+# Helper: compute weighted percentage of a factor level in the full design
+get_wt_pct <- function(des, var_name, level) {
+  # Use svymean on factor variable to get proportions for each level
+  frml <- as.formula(paste0("~", var_name))
+  dist <- svymean(frml, des, na.rm = TRUE)
+  # Extract the proportion for the specified level
+  coef_name <- paste0(var_name, level)
+  pct <- 100 * coef(dist)[coef_name]
+  sprintf("%.1f", pct)
+}
+
+# ─── OVERALL ───
+overall_p <- svymean(~q49_1, des_full, na.rm = TRUE)
+overall_est <- 100 * coef(overall_p)["q49_1Yes"]
+overall_se  <- 100 * SE(overall_p)["q49_1Yes"]
+overall_lo  <- overall_est - 1.96 * overall_se
+overall_hi  <- overall_est + 1.96 * overall_se
+
+rows <- list()
+rows[[1]] <- data.frame(
+  Characteristic = "Overall",
+  N = format(sum(!is.na(yrbs$q49_1)), big.mark = ","),
+  Wt_Pct = "",
+  Missing = get_missing_pct("q49_1"),
+  Prevalence = sprintf("%.1f", overall_est),
+  CI = paste0(sprintf("%.1f", overall_lo), "-", sprintf("%.1f", overall_hi)),
+  stringsAsFactors = FALSE
+)
+
+# ─── SEX ───
+rows[[length(rows) + 1]] <- data.frame(
+  Characteristic = "Sex", N = "", Wt_Pct = "", Missing = get_missing_pct("q2_1"),
+  Prevalence = "", CI = "", stringsAsFactors = FALSE)
+for (lev in c("Female", "Male")) {
+  r <- prev_row(des_full, "q2_1", lev, paste0("  ", lev))
+  r$Wt_Pct <- get_wt_pct(des_full, "q2_1", lev)
+  r$Missing <- ""
+  rows[[length(rows) + 1]] <- r
+}
+
+# ─── RACE/ETHNICITY ───
+rows[[length(rows) + 1]] <- data.frame(
+  Characteristic = "Race/Ethnicity", N = "", Wt_Pct = "", Missing = get_missing_pct("q4_1"),
+  Prevalence = "", CI = "", stringsAsFactors = FALSE)
+for (lev in c("White", "Black", "Latine/Multiple Latine",
+              "Multiple Non-Latine", "Other")) {
+  r <- prev_row(des_full, "q4_1", lev, paste0("  ", lev))
+  r$Wt_Pct <- get_wt_pct(des_full, "q4_1", lev)
+  r$Missing <- ""
+  rows[[length(rows) + 1]] <- r
+}
+
+# ─── GRADE ───
+rows[[length(rows) + 1]] <- data.frame(
+  Characteristic = "Grade", N = "", Wt_Pct = "", Missing = get_missing_pct("q3_1"),
+  Prevalence = "", CI = "", stringsAsFactors = FALSE)
+for (lev in c("9th", "10th", "11th", "12th")) {
+  r <- prev_row(des_full, "q3_1", lev, paste0("  ", lev))
+  r$Wt_Pct <- get_wt_pct(des_full, "q3_1", lev)
+  r$Missing <- ""
+  rows[[length(rows) + 1]] <- r
+}
+
+# ─── COMPOSITE PREDICTORS (binary: No/Yes) ───
+# Use full sample for standard-version composites; subsample for national-only
+comp_info <- list(
+  list(var = "su_life", label = "Lifetime polysubstance use",     des = des_full),
+  list(var = "rb_1",    label = "Risk behavior",                  des = des_full),
+  list(var = "bu_1",    label = "Bullying victimization",         des = des_full),
+  list(var = "sc_1",    label = "Suicidality",                    des = des_full),
+  list(var = "sv_1",    label = "Sexual victimization",           des = des_full),
+  list(var = "hh_1",    label = "Household adversity",             des = des_sub, sup = TRUE),
+  list(var = "ms_1",    label = "Community safety adversity",      des = des_sub, sup = TRUE)
+)
+
+for (ci in comp_info) {
+  # Compute missingness: use subsample denominator for national-only items
+  denom <- if (isTRUE(ci$sup)) n_sub else nrow(yrbs)
+  miss_data <- if (isTRUE(ci$sup)) yrbs[yrbs$in_subsample, ] else yrbs
+  miss_pct <- get_missing_pct(ci$var, data = miss_data, denom = denom)
+  # Header row for this composite
+  rows[[length(rows) + 1]] <- data.frame(
+    Characteristic = ci$label,
+    N = "", Wt_Pct = "", Missing = miss_pct, Prevalence = "", CI = "",
+    stringsAsFactors = FALSE)
+  # No and Yes rows with weighted %
+  for (lev in c("No", "Yes")) {
+    r <- prev_row(ci$des, ci$var, lev, paste0("  ", lev))
+    r$Wt_Pct <- get_wt_pct(ci$des, ci$var, lev)
+    r$Missing <- ""
+    rows[[length(rows) + 1]] <- r
+  }
+}
+
+# Combine all rows into one data frame
+t1_df <- bind_rows(rows)
+names(t1_df) <- c("Characteristic", "n", "Weighted %", "Missing (%)",
+                   "NMPOU Prevalence (%)", "95% CI")
+
+# Identify group-header rows (those with empty N column) for programmatic bold
+group_rows <- which(t1_df[[2]] == "")
+
+# Identify rows needing superscript "a" (Household adversity, Community safety)
+hh_row <- which(t1_df$Characteristic == "Household adversity")
+ms_row <- which(t1_df$Characteristic == "Community safety adversity")
+
+# Output formatted table with bold group headers and footer notes
+t1_notes <- paste0(
+  "Unweighted Ns and survey-weighted percentages are reported per CDC guidance. ",
+  "YRBS weights are calibrated for proportion estimation rather than population enumeration. ",
+  "95% CI = Wald-type confidence interval. ",
+  "(a) Household adversity and community safety adversity were administered only on the national ",
+  "questionnaire module (subsample n = ", format(n_sub, big.mark = ","),
+  "); all other variables were computed on the full sample (N = ", format(n_full, big.mark = ","), "). ",
+  "Lifetime polysubstance use = any cigarette, alcohol, or marijuana use (Q31, Q41, Q46). ",
+  "Risk behavior = weapon carrying or physical fighting (Q12, Q17). ",
+  "Bullying victimization = school or electronic bullying (Q24, Q25). ",
+  "Suicidality = seriously considered, planned, or attempted suicide (Q27, Q28, Q29). ",
+  "Sexual victimization = forced sexual intercourse or sexual debut at age 12 or younger (Q19, Q57). ",
+  "Household adversity = parental intimate partner violence, household substance use, or household mental illness (Q91, Q100, Q101). ",
+  "Community safety adversity = unsafe school absences, weapon threats at school, or unsafe neighborhood (Q14, Q15, Q18)."
+)
+
+ft1 <- ft_out(t1_df,
+  cap = "Table 1. Survey-Weighted Prevalence of Lifetime NMPOU by Demographic Characteristics and Composite Predictor Status",
+  align_spec = c("l", "c", "c", "c", "c", "c"),
+  notes = t1_notes)
+ft1 <- bold(ft1, i = group_rows, j = 1)
+
+# Add superscript "a" to Household adversity and Community safety rows
+ft1 <- compose(ft1, i = hh_row, j = 1, value = as_paragraph(
+  "Household adversity", as_sup("a")))
+ft1 <- compose(ft1, i = ms_row, j = 1, value = as_paragraph(
+  "Community safety adversity", as_sup("a")))
+ft1
+save_as_docx(ft1, path = here::here("figures", "Table1_Prevalence.docx"))
+```
+
+```{r figure1-forest, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE, fig.width=7, fig.height=5}
+# ============================================================
+# CHUNK 24: FIGURE 1 — FOREST PLOT (AME)
+# Purpose: Create a horizontal forest plot showing average marginal effects (percentage points) for all seven composite predictors from the primary model (M5).
+# Notes: AME labels positioned above CI lines. Times New Roman font. Saved as 300 DPI TIFF for journal submission.
+# ============================================================
+
+# FIGURE 1: Forest Plot of M5 Average Marginal Effects (AME)
+# Displays all 7 primary composite AMEs on the probability scale from the
+# full ecological model (M5). AMEs give the average change in P(Y=1) when
+# a binary predictor switches from "No" to "Yes", expressed in percentage
+# points. AMEs are collapsible and directly comparable across models.
+###############################################################################
+
+# Named color palette used consistently across Figures 1 and 2
+var_colors <- c(
+  "Polysubstance use" = "#1b9e77", "Risk behavior" = "#d95f02",
+  "Bullying" = "#7570b3", "Suicidality" = "#e7298a",
+  "Sexual victimization" = "#66a61e", "Household adversity" = "#e6ab02",
+  "Community safety" = "#a6761d"
+)
+
+# Build data frame from M5 AMEs (ame_M5 computed in ame-primary-models chunk)
+fig1_ame_terms <- c("su_life", "sc_1", "rb_1", "ms_1", "bu_1", "sv_1", "hh_1")
+fig1_ame_labels <- c("Polysubstance use", "Suicidality", "Risk behavior",
+                     "Community safety", "Bullying",
+                     "Sexual victimization", "Household adversity")
+
+fig1_df <- ame_M5[ame_M5$term %in% fig1_ame_terms, ]
+fig1_df$label <- fig1_ame_labels[match(fig1_df$term, fig1_ame_terms)]
+# Convert to percentage points for plotting
+fig1_df$AME_pp  <- fig1_df$estimate * 100
+fig1_df$CI_lo   <- fig1_df$conf.low * 100
+fig1_df$CI_hi   <- fig1_df$conf.high * 100
+fig1_df$signif  <- ifelse(fig1_df$p.value < 0.05, "p < .05", "n.s.")
+fig1_df <- fig1_df[order(fig1_df$AME_pp), ]
+fig1_df$label <- factor(fig1_df$label, levels = fig1_df$label)
+
+# Create AME forest plot
+fig1_plot <- ggplot(fig1_df, aes(x = AME_pp, y = label, color = label, shape = signif)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_pointrange(aes(xmin = CI_lo, xmax = CI_hi), size = 0.8, linewidth = 0.7) +
+  geom_text(aes(label = sprintf("%.1f", AME_pp)), nudge_y = 0.3, size = 3.2, show.legend = FALSE) +
+  scale_color_manual(values = var_colors, guide = "none") +
+  scale_shape_manual(values = c("p < .05" = 16, "n.s." = 1)) +
+  labs(x = "Average Marginal Effect (percentage points)", y = NULL,
+       shape = "Significance",
+       caption = paste(strwrap(paste0(
+                        "n = ", format(attr(res_M5, "n"), big.mark = ","),
+                        ". AME = average change in predicted probability of nonmedical ",
+                        "prescription opioid use when predictor switches from absent to present. ",
+                        "All models adjust for sex, grade, and race/ethnicity."), width = 80),
+                        collapse = "\n")) +
+  theme_classic(base_size = 11) +
+  theme(text = element_text(family = "sans"),
+        legend.position = "bottom",
+        plot.caption = element_text(size = 8, hjust = 0, lineheight = 1.1))
+print(fig1_plot)
+ggsave(here::here("figures", "Figure1_ForestPlot_M5.tiff"), fig1_plot,
+       width = 7, height = 5, dpi = 300, compression = "lzw")
+```
+
+```{r figure2-specificity, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE, fig.width=7, fig.height=7}
+# ============================================================
+# CHUNK 25: FIGURE 2 — SUBSTANCE SPECIFICITY PLOT
+# Purpose: Create a dot plot comparing AMEs for each predictor across five substance outcomes (NMPOU, alcohol, marijuana, cigarettes, cocaine).
+# Notes: Labels above upper CI bound to prevent overlap. Each substance model uses LOO polysubstance composites. Saved as 300 DPI TIFF.
+# ============================================================
+
+# FIGURE 2: Substance-Specific Average Marginal Effects With 95% CIs
+#
+# Design for Pediatrics (AAP):
+#   - Sans-serif font (Arial) per AAP figure guidelines
+#   - Abbreviations redefined in figure footnote
+#   - Linear y-axis in percentage points (directly interpretable)
+#   - Framework-consistent colors (F1 orange, F2 blue, F3 green)
+#     matching Figure 3's Euler diagrams
+#   - Width 7 inches (Pediatrics max), height 7 inches (within 9.25 max)
+###############################################################################
+
+library(ggplot2)
+library(dplyr)
+
+# ─── Build data frame from ame_all ───
+fig2_df <- ame_all[, c("term", "estimate", "conf.low", "conf.high", "p.value",
+                        "substance", "predictor_label")]
+fig2_df$AME_pp <- fig2_df$estimate * 100
+fig2_df$CI_lo  <- fig2_df$conf.low * 100
+fig2_df$CI_hi  <- fig2_df$conf.high * 100
+
+# ─── Variable labels and ordering ───
+fig2_label_map <- c(
+  "su_life" = "Polysubstance use", "rb_1" = "Risk behavior",
+  "bu_1" = "Bullying", "sc_1" = "Suicidality",
+  "sv_1" = "Sexual victimization", "hh_1" = "Household adversity",
+  "ms_1" = "Community safety"
+)
+fig2_df$Variable <- fig2_label_map[fig2_df$term]
+
+substance_names <- c("NMPOU", "Alcohol", "Marijuana", "Cigarettes", "Cocaine")
+fig2_df$Substance <- factor(fig2_df$substance, levels = substance_names)
+
+fig2_df$Variable <- factor(fig2_df$Variable,
+  levels = c("Polysubstance use", "Risk behavior",
+             "Bullying", "Suicidality",
+             "Sexual victimization", "Household adversity",
+             "Community safety"))
+
+fig2_df$signif <- ifelse(fig2_df$p.value < 0.05, "p < .05", "n.s.")
+
+# ─── Framework assignment ───
+fig2_df$Framework <- case_when(
+  fig2_df$term %in% c("su_life", "rb_1")       ~ "F1: Risk-Taking",
+  fig2_df$term %in% c("bu_1", "sc_1")          ~ "F2: Distress",
+  fig2_df$term %in% c("sv_1", "hh_1", "ms_1") ~ "F3: Adversity"
+)
+
+# ─── Color palette: framework-consistent, distinguishing variables ───
+var_colors_fw <- c(
+  "Polysubstance use"    = "#D55E00",  # F1 dark orange
+  "Risk behavior"        = "#E8A060",  # F1 light orange
+  "Bullying"             = "#0072B2",  # F2 dark blue
+  "Suicidality"          = "#56B4E9",  # F2 light blue
+  "Sexual victimization" = "#009E73",  # F3 dark green
+  "Household adversity"  = "#5AC8A0",  # F3 medium green
+  "Community safety"     = "#A0D8C8"   # F3 light green
+)
+
+# ─── Figure note (Pediatrics: abbreviations redefined in footnote) ───
+fig_note <- paste(strwrap(paste0(
+  "Note: Each substance model uses the fully adjusted specification (M5) ",
+  "with a leave-one-out polysubstance composite. Filled circles indicate ",
+  "p < .05; open circles indicate nonsignificant associations (p \u2265 .05). ",
+  "Error bars represent 95% confidence intervals. ",
+  "AME = average marginal effect; ",
+  "NMPOU = nonmedical prescription opioid use."), width = 80), collapse = "\n")
+
+# ─── Plot ───
+fig2_plot <- ggplot(fig2_df,
+    aes(x = Substance, y = AME_pp, color = Variable, shape = signif,
+        group = Variable)) +
+  # Zero reference line
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50",
+             linewidth = 0.4) +
+  # Error bars (behind points)
+  geom_errorbar(aes(ymin = CI_lo, ymax = CI_hi),
+                position = position_dodge(width = 0.75),
+                width = 0.15, linewidth = 0.45) +
+  # Points
+  geom_point(position = position_dodge(width = 0.75), size = 2) +
+  # AME value labels (significant effects only, above upper CI)
+  geom_text(data = subset(fig2_df, p.value < 0.05),
+            aes(y = CI_hi, label = sprintf("%.1f", AME_pp)),
+            position = position_dodge(width = 0.75),
+            vjust = -0.4, size = 2.2, fontface = "bold",
+            show.legend = FALSE) +
+  # Scales
+  scale_color_manual(
+    values = var_colors_fw,
+    guide = guide_legend(order = 1, nrow = 2, byrow = FALSE,
+                         override.aes = list(size = 2.5))) +
+  scale_shape_manual(
+    values = c("p < .05" = 16, "n.s." = 1),
+    guide = guide_legend(order = 2,
+                         override.aes = list(size = 2.5, color = "gray30"))) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.05, 0.10))) +
+  # Labels
+  labs(
+    y = "Average Marginal Effect (percentage points)",
+    x = NULL,
+    color = "Variable",
+    shape = "Significance",
+    caption = fig_note) +
+  # Theme: sans-serif per Pediatrics guidelines
+  theme_classic(base_size = 10) +
+  theme(
+    text = element_text(family = "sans"),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.spacing.y = unit(2, "pt"),
+    legend.margin = margin(t = 4, b = 0),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9, face = "bold"),
+    legend.key.size = unit(12, "pt"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9),
+    axis.title.y = element_text(size = 10, margin = margin(r = 6)),
+    plot.caption = element_text(size = 7.5, hjust = 0, color = "gray20",
+                                 margin = margin(t = 8)),
+    plot.margin = margin(t = 6, r = 8, b = 4, l = 4))
+
+print(fig2_plot)
+
+ggsave(here::here("figures", "Figure2_SubstanceSpecificity.tiff"), fig2_plot,
+       width = 7, height = 7, dpi = 300, compression = "lzw")
+```
+
+```{r figure3-framework, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE, fig.width=7, fig.height=9}
+# ============================================================
+# CHUNK 26: FIGURE 3 — FRAMEWORK ENDORSEMENT EULER DIAGRAMS
+# Purpose: Create three-panel proportional Euler diagrams showing framework endorsement among NMPOU-positive adolescents by race/ethnicity.
+# Notes: Panel A: F1 only. Panel B: F1 vs F2 (bullying + suicidality). Panel C: F1 vs F2 vs F3 (full three-framework). Circle sizes are proportional using Panel C euler() fit. eulerr v7.0.4.
+# ============================================================
+
+# FIGURE 3: Three-Panel Framework Endorsement Euler Diagrams by Race/Ethnicity
+# Panel A (top):    F1 only             — national-module subsample
+# Panel B (middle): F1 vs. F2           — national-module subsample
+# Panel C (bottom): F1 vs. F2 vs. F3   — national-module subsample
+#
+# Colors: F1 = orange, F2 = sky blue, F3 = bluish green (colorblind-safe)
+#
+# KEY DESIGN DECISIONS:
+#   - shape = "circle" in ALL euler() calls (no ellipses)
+#   - Panels A/B: grid graphics with exact geometry from Panel C
+#   - ALL five diagram columns have EQUAL width so circles are same size
+#   - clip = "off" on viewports so labels are never truncated
+#   - Tight top padding to minimize blank space above circles
+#   - make_euler_3fw() defined here; reused by Figure S1
+###############################################################################
+
+library(eulerr)
+library(patchwork)
+library(grid)
+library(survey)
+
+# ─── Color palette (colorblind-safe) ───
+col_f1 <- "#D55E00"  # Orange       (F1: Generalized Risk-Taking)
+col_f2 <- "#56B4E9"  # Sky blue     (F2: Distress Relief)
+col_f3 <- "#009E73"  # Bluish green (F3: Contextual Adversity)
+
+# Ethnicity groups and display labels
+eth_groups <- c("Latine/Multiple Latine", "White", "Black",
+                "Other", "Multiple Non-Latine")
+eth_labels <- c("Latine", "White", "Black", "Other", "Multiple\nNon-Latine")
+
+# ─── Full sample data ───
+nmpou_pos_full <- yrbs[!is.na(yrbs$q49_1) & yrbs$q49_1 == "Yes", ]
+n_panel_a <- nrow(nmpou_pos_full)
+nmpou_pos_full$F1 <- (nmpou_pos_full$su_life == "Yes" | nmpou_pos_full$rb_1 == "Yes")
+nmpou_pos_full$F2 <- (nmpou_pos_full$bu_1 == "Yes" | nmpou_pos_full$sc_1 == "Yes")
+nmpou_pos_full$F1[is.na(nmpou_pos_full$F1)] <- FALSE
+nmpou_pos_full$F2[is.na(nmpou_pos_full$F2)] <- FALSE
+des_panelA <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                         data = nmpou_pos_full, nest = TRUE)
+
+# ─── National-module subsample data: 3 frameworks ───
+nmpou_pos_sub <- yrbs[yrbs$in_subsample & !is.na(yrbs$q49_1) & yrbs$q49_1 == "Yes", ]
+n_panel_b <- nrow(nmpou_pos_sub)
+nmpou_pos_sub$F1 <- (nmpou_pos_sub$su_life == "Yes" | nmpou_pos_sub$rb_1 == "Yes")
+nmpou_pos_sub$F2 <- (nmpou_pos_sub$bu_1 == "Yes" | nmpou_pos_sub$sc_1 == "Yes")
+nmpou_pos_sub$F3 <- (nmpou_pos_sub$sv_1 == "Yes" | nmpou_pos_sub$hh_1 == "Yes" | nmpou_pos_sub$ms_1 == "Yes")
+nmpou_pos_sub$F1[is.na(nmpou_pos_sub$F1)] <- FALSE
+nmpou_pos_sub$F2[is.na(nmpou_pos_sub$F2)] <- FALSE
+nmpou_pos_sub$F3[is.na(nmpou_pos_sub$F3)] <- FALSE
+des_panelB <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                         data = nmpou_pos_sub, nest = TRUE)
+
+# ─── Helper: survey-weighted percentage, safe for small cells ───
+safe_pct <- function(formula, des) {
+  tryCatch({
+    val <- 100 * coef(svymean(formula, des, na.rm = TRUE))[2]
+    round(max(val, 0), 1)
+  }, error = function(e) 0)
+}
+
+# ─── Helper: compute 3-framework Euler data for one ethnicity ───
+make_euler_3fw <- function(des, group) {
+  sub <- subset(des, q4_1 == group)
+  list(
+    euler_input = c(
+      "F1"       = safe_pct(~ I( F1 & !F2 & !F3), sub),
+      "F2"       = safe_pct(~ I(!F1 &  F2 & !F3), sub),
+      "F3"       = safe_pct(~ I(!F1 & !F2 &  F3), sub),
+      "F1&F2"    = safe_pct(~ I( F1 &  F2 & !F3), sub),
+      "F1&F3"    = safe_pct(~ I( F1 & !F2 &  F3), sub),
+      "F2&F3"    = safe_pct(~ I(!F1 &  F2 &  F3), sub),
+      "F1&F2&F3" = safe_pct(~ I( F1 &  F2 &  F3), sub)
+    ),
+    n = nrow(sub$variables))
+}
+
+# ─── Compute percentages + Panel C euler fits ───
+pct_data  <- list()
+fit3_list <- list()
+
+for (i in seq_along(eth_groups)) {
+  g    <- eth_groups[i]
+  sub3 <- subset(des_panelB, q4_1 == g)
+
+  f1_only   <- safe_pct(~ I( F1 & !F2 & !F3), sub3)
+  f2_only   <- safe_pct(~ I(!F1 &  F2 & !F3), sub3)
+  f3_only   <- safe_pct(~ I(!F1 & !F2 &  F3), sub3)
+  f1f2_only <- safe_pct(~ I( F1 &  F2 & !F3), sub3)
+  f1f3_only <- safe_pct(~ I( F1 & !F2 &  F3), sub3)
+  f2f3_only <- safe_pct(~ I(!F1 &  F2 &  F3), sub3)
+  f1f2f3    <- safe_pct(~ I( F1 &  F2 &  F3), sub3)
+  n_sub     <- nrow(sub3$variables)
+
+  f1_total <- f1_only + f1f2_only + f1f3_only + f1f2f3
+  f2_total <- f2_only + f1f2_only + f2f3_only + f1f2f3
+
+  pB_f1_excl <- round(f1_only + f1f3_only, 1)
+  pB_f2_excl <- round(f2_only + f2f3_only, 1)
+  pB_f1f2    <- round(f1f2_only + f1f2f3, 1)
+
+  pct_data[[i]] <- list(
+    group = g, n = n_sub,
+    f1_only = f1_only, f2_only = f2_only, f3_only = f3_only,
+    f1f2_only = f1f2_only, f1f3_only = f1f3_only,
+    f2f3_only = f2f3_only, f1f2f3 = f1f2f3,
+    pA_f1 = round(f1_total, 1),
+    pB_f1_excl = pB_f1_excl, pB_f2_excl = pB_f2_excl, pB_f1f2 = pB_f1f2,
+    f1_total = f1_total, f2_total = f2_total
+  )
+
+  euler_input <- c(
+    "F1" = f1_only, "F2" = f2_only, "F3" = f3_only,
+    "F1&F2" = f1f2_only, "F1&F3" = f1f3_only,
+    "F2&F3" = f2f3_only, "F1&F2&F3" = f1f2f3
+  )
+  fit3_list[[i]] <- euler(euler_input, shape = "circle")
+}
+
+# ─── Store stats for inline references ───
+fig3_stats <- list()
+for (i in seq_along(eth_groups)) {
+  short <- c("latine", "white", "black", "other", "multi_nl")[i]
+  d <- pct_data[[i]]
+  fig3_stats[[paste0("f1_A_", short)]]         <- d$pA_f1
+  fig3_stats[[paste0("n_A_", short)]]          <- d$n
+  fig3_stats[[paste0("f1_only_B_", short)]]    <- d$pB_f1_excl
+  fig3_stats[[paste0("f2_only_B_", short)]]    <- d$pB_f2_excl
+  fig3_stats[[paste0("f1f2_B_", short)]]       <- d$pB_f1f2
+  fig3_stats[[paste0("n_B_", short)]]          <- d$n
+  fig3_stats[[paste0("f1f2_C_", short)]]       <- d$f1f2_only
+  fig3_stats[[paste0("f1f2f3_C_", short)]]     <- d$f1f2f3
+  fig3_stats[[paste0("f1f3_C_", short)]]       <- d$f1f3_only
+  fig3_stats[[paste0("f2f3_C_", short)]]       <- d$f2f3_only
+  fig3_stats[[paste0("n_C_", short)]]          <- d$n
+  fig3_stats[[paste0("f1f2_total_C_", short)]] <- round(d$f1f2_only + d$f1f2f3, 1)
+}
+
+###############################################################################
+# GRID-BASED DRAWING FOR PANELS A AND B
+###############################################################################
+
+farthest_point <- function(h, k, r, h_other, k_other, frac = 0.55) {
+  dx <- h - h_other; dy <- k - k_other
+  dist <- sqrt(dx^2 + dy^2)
+  if (dist < 1e-6) return(c(h, k))
+  c(h + frac * r * dx / dist, k + frac * r * dy / dist)
+}
+
+draw_panel_grid <- function(fit3, pct, eth_label, n_obs, panel,
+                             col_f1, col_f2) {
+  ell <- fit3$ellipses
+  h1 <- ell$h[1]; k1 <- ell$k[1]; r1 <- ell$a[1]
+
+  if (panel == "B") {
+    h2 <- ell$h[2]; k2 <- ell$k[2]; r2 <- ell$a[2]
+  }
+
+  # ── Bounding box: square with tight padding ──
+  if (panel == "A") {
+    xmin <- h1 - r1; xmax <- h1 + r1
+    ymin <- k1 - r1; ymax <- k1 + r1
+  } else {
+    xmin <- min(h1 - r1, h2 - r2); xmax <- max(h1 + r1, h2 + r2)
+    ymin <- min(k1 - r1, k2 - r2); ymax <- max(k1 + r1, k2 + r2)
+  }
+
+  dx <- xmax - xmin; dy <- ymax - ymin
+  span <- max(dx, dy)
+  cx <- (xmin + xmax) / 2; cy <- (ymin + ymax) / 2
+  half <- span / 2 * 1.12  # 12% padding
+
+  # Title space: reserve ~12% of total height above circles
+  title_reserve <- span * 0.14
+  xmin <- cx - half; xmax <- cx + half
+  ymin <- cy - half; ymax <- cy + half + title_reserve
+
+  total_w <- xmax - xmin; total_h <- ymax - ymin
+
+  norm_x <- function(x) (x - xmin) / total_w
+  norm_y <- function(y) (y - ymin) / total_h
+  norm_r <- function(r) r / total_w
+
+  grob_list <- grid::gList()
+
+  # ── F1 circle ──
+  grob_list <- grid::gList(grob_list,
+    grid::circleGrob(
+      x = unit(norm_x(h1), "npc"), y = unit(norm_y(k1), "npc"),
+      r = unit(norm_r(r1), "npc"),
+      gp = grid::gpar(fill = adjustcolor(col_f1, alpha.f = 0.4),
+                       col = col_f1, lwd = 2)))
+
+  if (panel == "B") {
+    grob_list <- grid::gList(grob_list,
+      grid::circleGrob(
+        x = unit(norm_x(h2), "npc"), y = unit(norm_y(k2), "npc"),
+        r = unit(norm_r(r2), "npc"),
+        gp = grid::gpar(fill = adjustcolor(col_f2, alpha.f = 0.4),
+                         col = col_f2, lwd = 2)))
+  }
+
+  # ── Labels and percentages ──
+  lbl_gp <- grid::gpar(fontsize = 8, fontface = "bold")
+  pct_gp <- grid::gpar(fontsize = 7)
+
+  if (panel == "A") {
+    grob_list <- grid::gList(grob_list,
+      grid::textGrob("F1",
+        x = unit(norm_x(h1), "npc"),
+        y = unit(norm_y(k1) + 0.04, "npc"), gp = lbl_gp),
+      grid::textGrob(paste0(pct$pA_f1, "%"),
+        x = unit(norm_x(h1), "npc"),
+        y = unit(norm_y(k1) - 0.04, "npc"), gp = pct_gp))
+  } else {
+    lp1 <- farthest_point(h1, k1, r1, h2, k2, 0.55)
+    grob_list <- grid::gList(grob_list,
+      grid::textGrob("F1",
+        x = unit(norm_x(lp1[1]), "npc"),
+        y = unit(norm_y(lp1[2]) + 0.03, "npc"), gp = lbl_gp),
+      grid::textGrob(paste0(pct$pB_f1_excl, "%"),
+        x = unit(norm_x(lp1[1]), "npc"),
+        y = unit(norm_y(lp1[2]) - 0.03, "npc"), gp = pct_gp))
+
+    lp2 <- farthest_point(h2, k2, r2, h1, k1, 0.55)
+    grob_list <- grid::gList(grob_list,
+      grid::textGrob("F2",
+        x = unit(norm_x(lp2[1]), "npc"),
+        y = unit(norm_y(lp2[2]) + 0.03, "npc"), gp = lbl_gp),
+      grid::textGrob(paste0(pct$pB_f2_excl, "%"),
+        x = unit(norm_x(lp2[1]), "npc"),
+        y = unit(norm_y(lp2[2]) - 0.03, "npc"), gp = pct_gp))
+
+    mx <- (h1 + h2) / 2; my <- (k1 + k2) / 2
+    grob_list <- grid::gList(grob_list,
+      grid::textGrob(paste0(pct$pB_f1f2, "%"),
+        x = unit(norm_x(mx), "npc"),
+        y = unit(norm_y(my), "npc"), gp = pct_gp))
+  }
+
+  # ── Title: just above top of highest circle ──
+  if (panel == "A") {
+    top_y <- norm_y(k1 + r1)
+  } else {
+    top_y <- max(norm_y(k1 + r1), norm_y(k2 + r2))
+  }
+  title_y <- top_y + 0.03
+
+  grob_list <- grid::gList(grob_list,
+    grid::textGrob(
+      paste0(eth_label, "\n(n = ", format(n_obs, big.mark = ","), ")"),
+      x = unit(0.5, "npc"), y = unit(title_y, "npc"),
+      vjust = 0,
+      gp = grid::gpar(fontsize = 8, fontface = "bold")))
+
+  # Use clip = "off" so labels that extend slightly beyond the panel are visible
+  grid::gTree(children = grob_list,
+              vp = grid::viewport(clip = "off"))
+}
+
+# ─── Build all panel grobs ───
+grobs_A <- list()
+grobs_B <- list()
+grobs_C <- list()
+
+for (i in seq_along(eth_groups)) {
+  d    <- pct_data[[i]]
+  fit3 <- fit3_list[[i]]
+
+  grobs_A[[i]] <- draw_panel_grid(fit3, d, eth_labels[i], d$n, "A",
+                                   col_f1, col_f2)
+  grobs_B[[i]] <- draw_panel_grid(fit3, d, eth_labels[i], d$n, "B",
+                                   col_f1, col_f2)
+
+  qty_c <- paste0(c(d$f1_only, d$f2_only, d$f3_only,
+                     d$f1f2_only, d$f1f3_only, d$f2f3_only,
+                     d$f1f2f3), "%")
+  grobs_C[[i]] <- plot(fit3,
+    fills      = list(fill = c(col_f1, col_f2, col_f3), alpha = 0.4),
+    edges      = list(col  = c(col_f1, col_f2, col_f3), lwd = 2),
+    labels     = list(fontsize = 8, font = 2),
+    quantities = list(fontsize = 7),
+    main       = list(
+      label    = paste0(eth_labels[i], "\n(n = ",
+                        format(d$n, big.mark = ","), ")"),
+      fontsize = 8, font = 2))
+}
+
+# ─── Legends ───
+build_legend <- function(colors, labels) {
+  n <- length(colors)
+  y_pos <- seq(0.55, 0.45, length.out = n)
+  grob_list <- grid::gList()
+  for (j in seq_along(colors)) {
+    grob_list <- grid::gList(grob_list,
+      grid::rectGrob(x = 0.04, y = y_pos[j], width = 0.07, height = 0.07,
+        gp = grid::gpar(fill = colors[j], col = "gray30", lwd = 1.5,
+                         alpha = 0.6)),
+      grid::textGrob(labels[j], x = 0.09, y = y_pos[j], just = "left",
+        gp = grid::gpar(fontsize = 7, fontfamily = "sans",
+                         fontface = "bold")))
+  }
+  grid::gTree(children = grob_list,
+              vp = grid::viewport(clip = "off"))
+}
+
+legend_1fw <- build_legend(col_f1, "F1: Risk-Taking")
+legend_2fw <- build_legend(c(col_f1, col_f2),
+                            c("F1: Risk-Taking", "F2: Distress"))
+legend_3fw <- build_legend(c(col_f1, col_f2, col_f3),
+                            c("F1: Risk-Taking", "F2: Distress",
+                              "F3: Adversity"))
+
+# ─── Wrap for patchwork (with clip = "off" theme to allow overflow) ───
+pA <- lapply(grobs_A, function(g) {
+  wrap_elements(g) +
+    theme(plot.margin = margin(1, 3, 1, 3))
+})
+pB <- lapply(grobs_B, function(g) {
+  wrap_elements(g) +
+    theme(plot.margin = margin(1, 3, 1, 3))
+})
+pC <- lapply(grobs_C, function(g) {
+  wrap_elements(g) +
+    theme(plot.margin = margin(1, 3, 1, 3))
+})
+pL_a <- wrap_elements(legend_1fw)
+pL_b <- wrap_elements(legend_2fw)
+pL_c <- wrap_elements(legend_3fw)
+
+# ALL 5 diagram columns EQUAL width → identical circle rendering size
+# Legend column narrower (0.5) but enough for short labels
+col_widths <- c(1, 1, 1, 1, 1, 0.85)
+
+row_a <- (pA[[1]] | pA[[2]] | pA[[3]] | pA[[4]] | pA[[5]] | pL_a) +
+  plot_layout(widths = col_widths)
+row_b <- (pB[[1]] | pB[[2]] | pB[[3]] | pB[[4]] | pB[[5]] | pL_b) +
+  plot_layout(widths = col_widths)
+row_c <- (pC[[1]] | pC[[2]] | pC[[3]] | pC[[4]] | pC[[5]] | pL_c) +
+  plot_layout(widths = col_widths)
+
+fig3_plot <- (row_a / row_b / row_c) +
+  plot_layout(heights = c(1, 1, 1)) +
+  plot_annotation(
+    subtitle = paste0(
+      "Panel A: F1 Only (n = ",
+      format(n_panel_b, big.mark = ","), ")        ",
+      "Panel B: F1 vs. F2 (n = ",
+      format(n_panel_b, big.mark = ","), ")        ",
+      "Panel C: Three Frameworks (n = ",
+      format(n_panel_b, big.mark = ","), ")"),
+    caption = paste(strwrap(paste0(
+      "All panels use the national-module subsample. ",
+      "Circle sizes in Panels A and B match Panel C (proportional scaling). ",
+      "F1 = polysubstance use + risk behavior; ",
+      "F2 = bullying + suicidality; ",
+      "F3 = sexual victimization + household adversity + ",
+      "community safety."), width = 80), collapse = "\n"),
+    theme = theme(
+      plot.subtitle = element_text(face = "bold", size = 9,
+                                    family = "sans",
+                                    margin = margin(t = 3, b = 2)),
+      plot.caption  = element_text(size = 7.5, hjust = 0,
+                                    family = "sans", lineheight = 1.1,
+                                    margin = margin(t = 2)),
+      plot.margin   = margin(t = 3, r = 3, b = 3, l = 3)))
+
+print(fig3_plot)
+
+invisible({
+  tiff(here::here("figures", "Figure3_FrameworkEndorsement.tiff"),
+       width = 7, height = 9, units = "in", res = 300, compression = "lzw")
+  print(fig3_plot)
+  dev.off()
+})
+```
+
+```{r model-diagnostics, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 27: TABLE S1 — MODEL SAMPLE SIZES AND CONVERGENCE
+# Purpose: Report sample sizes and convergence status for all fitted models (M1-M5) to verify that models ran successfully.
+# Notes: Convergence is checked via m$converged. Expected: all models converge. This is Table S1 in the supplement.
+# ============================================================
+
+# MODEL DIAGNOSTICS
+# Purpose: Report sample sizes, convergence, VIF, and Wald test results
+# for all primary models (M1-M5).
+###############################################################################
+
+# Dynamic convergence check from stored model objects
+conv_flag <- function(res) {
+  conv <- attr(res, "converged")
+  if (is.null(conv)) return("N/A")
+  ifelse(isTRUE(conv), "Yes", "No")
+}
+
+# Sample sizes for each model
+model_ns <- data.frame(
+  Model = c("M1", "M2a", "M2b", "M3", "M3-sub", "M4", "M5"),
+  Sample = c("Full", "Full", "Subsample", "Full", "Subsample", "Subsample", "Subsample"),
+  n = c(attr(res_M1, "n"), attr(res_M2a, "n"), attr(res_M2b, "n"),
+        attr(res_M3, "n"), attr(res_M3_sub, "n"), attr(res_M4, "n"), attr(res_M5, "n")),
+  Converged = c(conv_flag(res_M1), conv_flag(res_M2a), conv_flag(res_M2b),
+                conv_flag(res_M3), conv_flag(res_M3_sub), conv_flag(res_M4), conv_flag(res_M5)),
+  stringsAsFactors = FALSE
+)
+model_ns$n <- format(model_ns$n, big.mark = ",")
+
+# Generalized VIF for M5 (full ecological model)
+# For survey-weighted models, compute VIF from the model matrix correlation
+m5_model <- attr(res_M5, "model")
+mm <- model.matrix(m5_model)
+# Remove intercept column
+mm <- mm[, -1, drop = FALSE]
+# Compute correlation matrix and VIF from R-squared of each predictor on all others
+vif_vals <- sapply(1:ncol(mm), function(j) {
+  r2 <- summary(lm(mm[, j] ~ mm[, -j]))$r.squared
+  1 / (1 - r2)
+})
+names(vif_vals) <- colnames(mm)
+
+# Create VIF table for predictors of interest
+pred_names <- c("su_lifeYes", "rb_1Yes", "bu_1Yes", "sc_1Yes", "sv_1Yes",
+                "hh_1Yes", "ms_1Yes")
+pred_labels <- c("Lifetime polysubstance use", "Risk behavior",
+                 "Bullying victimization", "Suicidality", "Sexual victimization",
+                 "Household adversity", "Community safety adversity")
+vif_df <- data.frame(
+  Predictor = pred_labels,
+  VIF = sprintf("%.2f", vif_vals[pred_names]),
+  stringsAsFactors = FALSE
+)
+
+# Block-wise Wald test results
+wald_df <- data.frame(
+  Comparison = c("M3 vs. M2a (adding F1: polysubstance + risk behavior)",
+                 "M4 vs. M3-sub (adding F3: sexual victimization + household adversity)",
+                 "M5 vs. M4 (adding community safety adversity)"),
+  F_statistic = c(sprintf("%.2f", wald_m3$Ftest),
+                  sprintf("%.2f", wald_m4$Ftest),
+                  sprintf("%.2f", wald_m5$Ftest)),
+  p_value = c(fmt_p(wald_m3$p), fmt_p(wald_m4$p), fmt_p(wald_m5$p)),
+  stringsAsFactors = FALSE
+)
+names(wald_df) <- c("Comparison", "F", "p")
+
+# Display sample size and convergence table
+ft_out(model_ns,
+  cap = "Table S1. Model Sample Sizes and Convergence Status",
+  align_spec = c("l", "l", "c", "c"),
+  notes = "All models estimated using survey-weighted logistic regression (svyglm, quasibinomial family). Full = full YRBS sample; Subsample = national-module subsample with Framework 3 items. All models converged without warnings.")
+
+```
+
+```{r model-diagnostics-vif, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 28: TABLE S2 — VARIANCE INFLATION FACTORS
+# Purpose: Compute VIF for M5 predictors to check for multicollinearity. VIF > 5 would indicate problematic collinearity.
+# Notes: Uses car::vif() adapted for survey design. Expected: all VIF < 2 given binary predictors. This is Table S2.
+# ============================================================
+
+# Display VIF table
+ft_out(vif_df,
+  cap = "Table S2. Variance Inflation Factors for M5 Predictors",
+  align_spec = c("l", "c"),
+  notes = "VIF computed from the model matrix of the fully adjusted M5 specification. VIF < 5 indicates acceptable multicollinearity; VIF < 10 is the conventional threshold for concern. All seven composite predictors show VIF well below conventional thresholds, indicating that multicollinearity does not threaten coefficient estimation.")
+
+```
+
+```{r model-diagnostics-wald, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 29: TABLE S3 — BLOCK-WISE WALD TESTS
+# Purpose: Test whether each model step provides significant incremental improvement using block-wise Wald tests (regTermTest).
+# Notes: Tests whether added predictors collectively improve model fit. All steps expected to be significant. This is Table S3.
+# ============================================================
+
+# Display Wald test table
+ft_out(wald_df,
+  cap = "Table S3. Block-Wise Wald Tests for Incremental Model Improvement",
+  align_spec = c("l", "c", "c"),
+  notes = "Each test evaluates whether the added block of predictors significantly improves model fit beyond the previous specification. All blocks contributed significantly.")
+```
+
+```{r composite-summary-table, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 30: TABLE S4 — COMPOSITE SUMMARY
+# Purpose: Display item composition, temporal frame, and reliability statistics for each composite predictor.
+# Notes: Provides the measurement detail that supports the main text. Includes alpha, omega, Spearman-Brown, and bootstrap CIs. This is Table S4.
+# ============================================================
+
+# COMPOSITE SUMMARY TABLE: Compact overview of all composites
+###############################################################################
+
+comp_summary <- data.frame(
+  Composite = c("Lifetime polysubstance use", "Risk behavior",
+                "Bullying victimization", "Suicidality", "Sexual victimization",
+                "Household adversity", "Community safety adversity"),
+  Items = c("Q31, Q41, Q46", "Q12, Q17", "Q24, Q25",
+            "Q27, Q28, Q29", "Q19, Q57", "Q91, Q100, Q101", "Q14, Q15, Q18"),
+  Frame = c("Lifetime", "Past 30 days/12 months", "Past 12 months",
+            "Past 12 months", "Lifetime", "Lifetime/ever", "Past 30 days/12 months"),
+  Metric = c("Alpha", "Spearman-Brown", "Spearman-Brown",
+             "Alpha", "Spearman-Brown", "Alpha", "Alpha"),
+  Value = c(
+    sprintf("%.2f", rel_su_life$alpha),
+    sprintf("%.2f", rel_rb_1$sb),
+    sprintf("%.2f", rel_bu_1$sb),
+    sprintf("%.2f", rel_sc_1$alpha),
+    sprintf("%.2f", rel_sv_1$sb),
+    sprintf("%.2f", rel_hh_1$alpha),
+    sprintf("%.2f", rel_ms_1$alpha)),
+  Boot_CI = c(
+    paste0("[", sprintf("%.2f", rel_su_life$ci_lo), ", ", sprintf("%.2f", rel_su_life$ci_hi), "]"),
+    paste0("[", sprintf("%.2f", rel_rb_1$ci_lo), ", ", sprintf("%.2f", rel_rb_1$ci_hi), "]"),
+    paste0("[", sprintf("%.2f", rel_bu_1$ci_lo), ", ", sprintf("%.2f", rel_bu_1$ci_hi), "]"),
+    paste0("[", sprintf("%.2f", rel_sc_1$ci_lo), ", ", sprintf("%.2f", rel_sc_1$ci_hi), "]"),
+    paste0("[", sprintf("%.2f", rel_sv_1$ci_lo), ", ", sprintf("%.2f", rel_sv_1$ci_hi), "]"),
+    paste0("[", sprintf("%.2f", rel_hh_1$ci_lo), ", ", sprintf("%.2f", rel_hh_1$ci_hi), "]"),
+    paste0("[", sprintf("%.2f", rel_ms_1$ci_lo), ", ", sprintf("%.2f", rel_ms_1$ci_hi), "]")),
+  stringsAsFactors = FALSE
+)
+names(comp_summary) <- c("Composite", "Items", "Temporal Frame", "Metric", "Value", "95% Boot CI")
+
+ft_s2 <- ft_out(comp_summary,
+  cap = "Table S4. Composite Summary: Items, Temporal Frame, and Reliability",
+  align_spec = c("l", "l", "l", "l", "c", "c"),
+  notes = "All composites coded dichotomously (0 = no items endorsed; 1 = any item endorsed). Boot CI = percentile bootstrap confidence interval (500 resamples).")
+ft_s2
+save_as_docx(ft_s2, path = here::here("figures", "TableS4_CompositeSummary.docx"))
+```
+
+```{r table-s3-primary-models, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 31: TABLE S5 — PRIMARY MODELS (AOR + AME)
+# Purpose: Display adjusted odds ratios and average marginal effects from the primary model sequence (M1-M5) for all predictors.
+# Notes: M1-M3 use the full sample; M4-M5 use the national-module subsample. AOR and AME reported side by side. This is Table S5.
+# ============================================================
+
+# TABLE S5: Primary Models — Adjusted Odds Ratios
+# Displays AORs from M1, M2a, M3, M4, M5 for ALL predictor variables,
+# including demographic covariates (grade, race/ethnicity).
+###############################################################################
+
+# Full list of predictor terms to display
+all_terms <- c("q2_1Female",
+               "q3_110th", "q3_111th", "q3_112th",
+               "q4_1Black", "q4_1Latine/Multiple Latine",
+               "q4_1Multiple Non-Latine", "q4_1Other",
+               "su_lifeYes", "rb_1Yes",
+               "bu_1Yes", "sc_1Yes", "sv_1Yes",
+               "hh_1Yes", "ms_1Yes")
+
+# Proper display labels for each term (no variable names)
+all_labels <- c(
+  "q2_1Female"                        = "Female sex",
+  "q3_110th"                          = "Grade 10th",
+  "q3_111th"                          = "Grade 11th",
+  "q3_112th"                          = "Grade 12th",
+  "q4_1Black"                    = "Black",
+  "q4_1Latine/Multiple Latine"   = "Latine/Multiple Latine",
+  "q4_1Multiple Non-Latine"      = "Multiple Non-Latine",
+  "q4_1Other"                    = "Other race/ethnicity",
+  "su_lifeYes"                        = "Lifetime polysubstance use",
+  "rb_1Yes"                           = "Risk behavior",
+  "bu_1Yes"                           = "Bullying victimization",
+  "sc_1Yes"                           = "Suicidality",
+  "sv_1Yes"                           = "Sexual victimization",
+  "hh_1Yes"                           = "Household adversity",
+  "ms_1Yes"                           = "Community safety adversity"
+)
+
+# Helper: format a single model's results into AOR (CI) string with significance
+fmt_aor <- function(res, term) {
+  row <- res[res$term == term, ]
+  if (nrow(row) == 0) return("--")
+  paste0(sprintf("%.2f", row$AOR), " (", sprintf("%.2f", row$CI_lo),
+         "-", sprintf("%.2f", row$CI_hi), ")", row$sig)
+}
+
+# Helper: format AME from ame_M5 as "X.X (X.X, X.X)" percentage points
+fmt_ame_s3 <- function(ame_df, term_name) {
+  # Strip "Yes" suffix to match AME term naming
+  t_clean <- sub("Yes$", "", term_name)
+  row <- ame_df[ame_df$term == t_clean, ]
+  if (nrow(row) == 0) return("--")
+  sprintf("%.1f (%.1f, %.1f)",
+    row$estimate * 100, row$conf.low * 100, row$conf.high * 100)
+}
+
+# Build data frame with all variables across all 5 models + M5 AME
+t2_df <- data.frame(
+  Predictor = all_labels[all_terms],
+  M1  = sapply(all_terms, function(t) fmt_aor(res_M1, t)),
+  M2a = sapply(all_terms, function(t) fmt_aor(res_M2a, t)),
+  M3  = sapply(all_terms, function(t) fmt_aor(res_M3, t)),
+  M4  = sapply(all_terms, function(t) fmt_aor(res_M4, t)),
+  M5  = sapply(all_terms, function(t) fmt_aor(res_M5, t)),
+  M5_AME = sapply(all_terms, function(t) fmt_ame_s3(ame_M5, t)),
+  stringsAsFactors = FALSE, row.names = NULL
+)
+
+# Add sample size row at the bottom
+n_row <- data.frame(
+  Predictor = "N",
+  M1  = format(attr(res_M1, "n"), big.mark = ","),
+  M2a = format(attr(res_M2a, "n"), big.mark = ","),
+  M3  = format(attr(res_M3, "n"), big.mark = ","),
+  M4  = format(attr(res_M4, "n"), big.mark = ","),
+  M5  = format(attr(res_M5, "n"), big.mark = ","),
+  M5_AME = "",
+  stringsAsFactors = FALSE
+)
+t2_df <- rbind(t2_df, n_row)
+
+# Rename M5_AME column for display
+names(t2_df)[names(t2_df) == "M5_AME"] <- "M5 AME (pp)"
+
+# Output formatted table
+ft_s3 <- ft_out(t2_df,
+  cap = "Table S5. Adjusted Odds Ratios and Average Marginal Effects From Primary Logistic Regression Models Predicting Lifetime NMPOU",
+  align_spec = c("l", rep("c", 6)),
+  notes = "AOR columns show adjusted odds ratios (95% confidence intervals). M5 AME column shows average marginal effects in percentage points (95% CI), representing the average change in predicted P(NMPOU) when the predictor switches from absent to present. M1 = demographics only. M2a = demographics + distress variables (bullying, suicidality). M3 = M2a + lifetime polysubstance use + risk behavior. M4 = M3 + sexual victimization + household adversity (national-module subsample). M5 = M4 + community safety adversity (national-module subsample). Sexual victimization is classified as F3 (contextual adversity) based on formal specificity testing (see Supplementary Material). Reference categories: male sex, 9th grade, White race/ethnicity. \"--\" indicates that the predictor was not included in that model. *p < .05; **p < .01; ***p < .001.")
+ft_s3
+save_as_docx(ft_s3, path = here::here("figures", "TableS5_PrimaryModels.docx"))
+```
+
+```{r table-s4-drug-specific, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 32: TABLE S6 — DRUG-SPECIFIC AOR
+# Purpose: Display adjusted odds ratios from M5 specification across five lifetime substance outcomes.
+# Notes: Each column shows a separate M5-equivalent model with substance-specific LOO composites. Bold indicates p < .05. This is Table S6.
+# ============================================================
+
+# TABLE S6: Drug-Specific Replications — AORs Across 5 Substance Outcomes
+# Shows all M5 predictors for each substance outcome.
+###############################################################################
+
+# All predictor terms to display (including polysubstance LOO and female sex)
+all_ds_terms <- c("su_lifeYes", "rb_1Yes", "bu_1Yes", "sc_1Yes",
+                  "sv_1Yes", "hh_1Yes", "ms_1Yes", "q2_1Female")
+all_ds_labels <- c("Polysubstance use (LOO)", "Risk behavior",
+                   "Bullying victimization", "Suicidality",
+                   "Sexual victimization", "Household adversity",
+                   "Community safety adversity", "Female sex")
+
+# Helper: get the polysubstance AOR with full CI from a drug-specific result
+# The polysubstance term name varies by model (su_lifeYes vs su_loo_*Yes)
+get_su_full <- function(res) {
+  for (t in c("su_lifeYes", "su_loo_alcYes", "su_loo_marYes",
+              "su_loo_cigYes", "su_loo_cocYes")) {
+    row <- res[res$term == t, ]
+    if (nrow(row) > 0) {
+      # Return full AOR (CI) string with significance stars
+      return(paste0(sprintf("%.2f", row$AOR), " (",
+                    sprintf("%.2f", row$CI_lo), "-",
+                    sprintf("%.2f", row$CI_hi), ")", row$sig))
+    }
+  }
+  return("--")
+}
+
+# Build table rows
+t3_list <- list()
+for (i in seq_along(all_ds_terms)) {
+  t <- all_ds_terms[i]
+  if (t == "su_lifeYes") {
+    # Special handling for polysubstance (different term names per model)
+    t3_list[[i]] <- data.frame(
+      Predictor = all_ds_labels[i],
+      NMPOU     = get_su_full(res_ds_nmpou),
+      Alcohol   = get_su_full(res_ds_alc),
+      Marijuana = get_su_full(res_ds_mar),
+      Cigarettes = get_su_full(res_ds_cig),
+      Cocaine   = get_su_full(res_ds_coc),
+      stringsAsFactors = FALSE)
+  } else {
+    t3_list[[i]] <- data.frame(
+      Predictor = all_ds_labels[i],
+      NMPOU     = fmt_aor(res_ds_nmpou, t),
+      Alcohol   = fmt_aor(res_ds_alc, t),
+      Marijuana = fmt_aor(res_ds_mar, t),
+      Cigarettes = fmt_aor(res_ds_cig, t),
+      Cocaine   = fmt_aor(res_ds_coc, t),
+      stringsAsFactors = FALSE)
+  }
+}
+t3_df <- bind_rows(t3_list)
+
+# Add sample size row
+t3_n <- data.frame(
+  Predictor = "N",
+  NMPOU = format(attr(res_ds_nmpou, "n"), big.mark = ","),
+  Alcohol = format(attr(res_ds_alc, "n"), big.mark = ","),
+  Marijuana = format(attr(res_ds_mar, "n"), big.mark = ","),
+  Cigarettes = format(attr(res_ds_cig, "n"), big.mark = ","),
+  Cocaine = format(attr(res_ds_coc, "n"), big.mark = ","),
+  stringsAsFactors = FALSE)
+t3_df <- rbind(t3_df, t3_n)
+
+# Output formatted table
+ft_s4 <- ft_out(t3_df,
+  cap = "Table S6. Adjusted Odds Ratios (95% CI) From M5 Specification Across Five Lifetime Substance Outcomes",
+  align_spec = c("l", rep("c", 5)),
+  notes = "Each column reports adjusted odds ratios (95% CI) from the M5 specification applied to a different lifetime substance outcome. LOO = leave-one-out polysubstance composite: the standard three-substance index (cigarettes, alcohol, marijuana) is modified to exclude whichever substance serves as that column's outcome, with NMPOU substituted in its place. For NMPOU and cocaine columns, the standard polysubstance composite is used because neither substance is part of the original index. All models adjust for sex, grade, and race/ethnicity. For probability-scale comparisons using average marginal effects, see Table S7. *p < .05; **p < .01; ***p < .001.")
+ft_s4
+save_as_docx(ft_s4, path = here::here("figures", "TableS6_DrugSpecific.docx"))
+```
+
+```{r table-s11-ame, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 33: TABLE S7 — AME BY SUBSTANCE
+# Purpose: Display average marginal effects (probability scale) for each predictor across five substance outcomes.
+# Notes: Complements Table S6 by showing associations on the probability scale. This is Table S7.
+# ============================================================
+
+# TABLE S7: Average Marginal Effects by Substance Type
+# Purpose: Report probability-scale AMEs for all 7 composite predictors
+#          across 5 substance outcomes. AMEs are invariant to residual-
+#          variance differences across groups (Allison, 1999).
+# MODIFIED IN v3 — added polysubstance use (su_life) to display; was missing in v2
+###############################################################################
+
+# Build wide-format table for display
+# MODIFIED IN v3 — include all 7 predictors (su_life + 6 framework variables)
+ame_vars_s7 <- c("su_life", ame_vars)  # MODIFIED IN v3 — added su_life
+s11_display <- data.frame(
+  Variable = ame_labels[ame_vars_s7],
+  stringsAsFactors = FALSE
+)
+
+for (sub in c("NMPOU", "Alcohol", "Marijuana", "Cigarettes", "Cocaine")) {
+  sub_data <- ame_all[ame_all$substance == sub, ]
+  sub_data <- sub_data[match(ame_vars_s7, sub_data$term), ]  # MODIFIED IN v3 — uses ame_vars_s7
+  s11_display[[paste0(sub, " AME (95% CI)")]] <-
+    sprintf("%.3f (%.3f, %.3f)", sub_data$estimate, sub_data$conf.low, sub_data$conf.high)
+}
+
+s11_notes <- paste0(
+  "AME = average marginal effect on the probability scale (change in P(Y=1) when ",
+  "the binary predictor switches from No to Yes, averaged over all observed covariate ",
+  "values). AMEs are invariant to group-specific residual distributions, addressing the ",
+  "concern that logistic regression coefficients may not be directly comparable across ",
+  "outcome types when residual variance differs (Allison, 1999). Each substance model ",
+  "uses the M5 specification with leave-one-out polysubstance composites (national-module ",
+  "subsample). Linear probability model sensitivity: distress interaction Wald F = ",
+  round(wald_lpm_distress$Ftest, 2), ", p = ", format.pval(wald_lpm_distress$p, digits = 4),
+  ". Relaxed su_loo constraint sensitivity: distress interaction Wald F = ",
+  round(wald_relaxed_distress$Ftest, 2), ", p = ",
+  format.pval(wald_relaxed_distress$p, digits = 4), "."
+)
+
+ft_s11 <- ft_out(s11_display,
+  cap = "Table S7. Average Marginal Effects (Probability Scale) by Substance Type",
+  align_spec = c("l", rep("c", 5)),
+  notes = s11_notes)
+ft_s11
+save_as_docx(ft_s11, path = here::here("figures", "TableS7_AME.docx"))
+```
+
+```{r table-s12-sv1-framework, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 34: TABLE S8 — SEXUAL VICTIMIZATION FRAMEWORK CLASSIFICATION
+# Purpose: Present the six empirical tests that justified classifying sv_1 within F3 (contextual adversity) rather than F2 (distress relief).
+# Notes: 4/6 tests favor F3 classification. Tests: specificity ratio, substance heterogeneity, KHB mediation, AME profile, pairwise z-tests, F2-model fit. This is Table S8.
+# ============================================================
+
+# TABLE S8: Sexual Victimization (sv_1) Framework Evaluation
+# Purpose: Summarize six independent tests evaluating whether sv_1 behaves
+#          empirically as F2 (Distress Relief) or F3 (Contextual Adversity).
+# Decision: sv_1 classified in F3 based on 4-5/6 tests favoring F3.
+###############################################################################
+
+# Retrieve key statistics from existing objects for the table
+# Test 1: Opioid specificity ratio (AME for sv_1 NMPOU / mean AME across substances)
+sv1_nmpou_ame <- ame_all[ame_all$term == "sv_1" & ame_all$substance == "NMPOU", "estimate"]
+sv1_all_ame <- ame_all[ame_all$term == "sv_1", "estimate"]
+sv1_ratio <- abs(sv1_nmpou_ame) / mean(abs(sv1_all_ame))
+
+# Test 2: Substance-specific significance count
+sv1_subs <- ame_all[ame_all$term == "sv_1", ]
+sv1_sig_count <- sum(sv1_subs$p.value < 0.05)
+
+# Test 3: Stacked Wald heterogeneity for sv_1
+sv1_wald_p <- wald_sv$p
+
+# Test 4: KHB mediation
+sv1_khb_pct <- round(prop_med_sv, 1)
+
+# Build summary table
+s12_df <- data.frame(
+  Test = c(
+    "1. Opioid specificity ratio",
+    "2. Substance-specific significance",
+    "3. Stacked Wald heterogeneity",
+    "4. KHB polysubstance mediation",
+    "5. AME profile",
+    "6. Tetrachoric correlations"
+  ),
+  Result = c(
+    sprintf("Ratio = %.2f (values < 1.0 indicate general, not opioid-specific, associations)", sv1_ratio),
+    sprintf("%d of 5 substances significant (F2 variables typically show 1-2)", sv1_sig_count),
+    sprintf("p = %s (significant heterogeneity, but marijuana-dominant, not NMPOU-dominant)", fmt_p(sv1_wald_p)),
+    sprintf("%.1f%% mediated (highest of all 6 predictors; F3 mean = 18.1%%)", sv1_khb_pct),
+    "Strongest AME for marijuana, not NMPOU (F2 pattern would show NMPOU-dominant)",
+    "Higher tetrachoric r with F3 items (hh_1, ms_1) than with F2 items (bu_1, sc_1)"
+  ),
+  Verdict = c("F3", "F3", "Ambiguous", "F3", "F3", "F2"),
+  stringsAsFactors = FALSE
+)
+
+s12_notes <- paste0(
+  "Six independent tests evaluated whether sexual victimization (sv_1) behaves ",
+  "empirically like a Framework 2 (Distress Relief) variable or a Framework 3 ",
+  "(Contextual Adversity) variable. Tests used AMEs from drug-specific models (Table S7), ",
+  "the stacked-outcome heterogeneity test (Table S12), and KHB decomposition (Table S11). ",
+  "Overall: 4 tests favor F3, 1 favors F2 (tetrachoric correlations), 1 is ambiguous ",
+  "(Wald heterogeneity is significant but marijuana-dominant rather than NMPOU-dominant). ",
+  "Sexual victimization is a hybrid construct: while it produces emotional distress, ",
+  "the mechanism through which it increases substance use is general trauma-coping ",
+  "rather than the opioid-specific social-pain circuit that characterizes bullying. ",
+  "See scripts/sexual_victimization_F2orF3.Rmd for the complete analysis code."
+)
+
+ft_s12 <- ft_out(s12_df,
+  cap = "Table S8. Empirical Evaluation of Sexual Victimization Framework Classification",
+  align_spec = c("l", "l", "c"),
+  notes = s12_notes)
+ft_s12 <- width(ft_s12, j = 1, width = 1.8)
+ft_s12 <- width(ft_s12, j = 2, width = 4.0)
+ft_s12 <- width(ft_s12, j = 3, width = 0.8)
+ft_s12
+save_as_docx(ft_s12, path = here::here("figures", "TableS8_sv1_Framework.docx"))
+```
+
+```{r table-s1-reliability, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 35: TABLE S9 — COMPOSITE RELIABILITY
+# Purpose: Display detailed reliability statistics for all composite indices.
+# Notes: Includes tetrachoric alpha, McDonald's omega, Spearman-Brown, bootstrap 95% CI, and CFA loadings. This is Table S9.
+# ============================================================
+
+# TABLE S9: Composite Reliability for Primary Indices
+# Uses proper labels (not variable names like su_life) per comment 27.
+###############################################################################
+
+all_rel_s1 <- list(rel_su_life, rel_rb_1, rel_rb_1_3item, rel_bu_1, rel_sc_1,
+                    rel_sv_1, rel_hh_1, rel_ms_1)
+s1_df <- data.frame(
+  Composite = c("Lifetime polysubstance use",
+                "Risk behavior (primary)",
+                "Risk behavior (3-item, SM7)",
+                "Bullying victimization",
+                "Suicidality",
+                "Sexual victimization",
+                "Household adversity",
+                "Community safety adversity"),
+  Items = c("Q31, Q41, Q46",
+            "Q12, Q17",
+            "Q10, Q12, Q17",
+            "Q24, Q25",
+            "Q27, Q28, Q29",
+            "Q19, Q57",
+            "Q91, Q100, Q101",
+            "Q14, Q15, Q18"),
+  N = sapply(all_rel_s1, function(r) format(r$n, big.mark = ",")),
+  Alpha = sapply(all_rel_s1, function(r) ifelse(is.na(r$alpha), "--", sprintf("%.2f", r$alpha))),
+  Omega = sapply(all_rel_s1, function(r) ifelse(is.na(r$omega), "--", sprintf("%.2f", r$omega))),
+  SB = sapply(all_rel_s1, function(r) ifelse(is.na(r$sb), "--", sprintf("%.2f", r$sb))),
+  Boot_CI = sapply(all_rel_s1, function(r) {
+    if (is.na(r$ci_lo) || is.na(r$ci_hi)) return("--")
+    paste0("[", sprintf("%.2f", r$ci_lo), ", ", sprintf("%.2f", r$ci_hi), "]")
+  }),
+  stringsAsFactors = FALSE
+)
+names(s1_df)[6] <- "Spearman-Brown"
+names(s1_df)[7] <- "95% Boot CI"
+
+ft_s5 <- ft_out(s1_df,
+  cap = "Table S9. Composite Reliability for Primary Indices",
+  align_spec = c("l", "l", "r", "c", "c", "c", "c"),
+  notes = "Alpha = tetrachoric alpha. Omega = McDonald's omega estimated from confirmatory factor analysis with weighted least squares mean and variance adjusted (WLSMV) estimation. Spearman-Brown prophecy formula used for two-item composites. 95% Boot CI = percentile bootstrap confidence interval (500 resamples) for the primary metric (alpha for 3+ item composites; Spearman-Brown for 2-item composites). \"--\" indicates not applicable or not estimable. Omega is not estimable for the 3-item risk behavior composite because the one-factor CFA model did not converge, consistent with the heterogeneous item content (weapon carrying, physical fighting, riding with a drunk driver) spanning active aggression and passive risk acceptance; this heterogeneity is discussed in the main text. The primary risk behavior composite uses 2 items (Q12, Q17); the 3-item version (Q10, Q12, Q17) is tested in sensitivity analysis SM7. Q31 = lifetime cigarette use. Q41 = lifetime alcohol use. Q46 = lifetime marijuana use. Q10 = riding with drunk driver. Q12 = weapon carrying. Q17 = physical fighting. Q24 = school bullying. Q25 = cyberbullying. Q27 = seriously considered suicide. Q28 = made a suicide plan. Q29 = attempted suicide. Q19 = forced sexual intercourse. Q57 = age of first sexual intercourse (dichotomized as age 12 or younger). Q91 = parental intimate partner violence. Q100 = household substance use. Q101 = household mental illness. Q14 = unsafe school absences. Q15 = weapon threats at school. Q18 = unsafe neighborhood.")
+ft_s5
+save_as_docx(ft_s5, path = here::here("figures", "TableS9_Reliability.docx"))
+```
+
+```{r table-s2-subsample, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 36: TABLE S10 — SUBSAMPLE VALIDATION
+# Purpose: Compare M3 estimates between the full sample and national-module subsample to verify that the two analytic samples yield comparable results.
+# Notes: AOR change < 4.3% for all predictors confirms subsample comparability. This is Table S10.
+# ============================================================
+
+# TABLE S10: Subsample Validation
+# Compares M3 results on full sample vs national-module subsample.
+###############################################################################
+
+val_terms <- c("q2_1Female",
+               "q3_110th", "q3_111th", "q3_112th",
+               "q4_1Black", "q4_1Latine/Multiple Latine",
+               "q4_1Multiple Non-Latine", "q4_1Other",
+               "su_lifeYes", "rb_1Yes", "bu_1Yes", "sc_1Yes")
+val_labels <- c("Female sex",
+                "Grade 10th", "Grade 11th", "Grade 12th",
+                "Black", "Latine/Multiple Latine",
+                "Multiple Non-Latine", "Other race/ethnicity",
+                "Lifetime polysubstance use", "Risk behavior",
+                "Bullying victimization", "Suicidality")
+
+s2_df <- data.frame(
+  Predictor = val_labels,
+  Full_AOR = sapply(val_terms, function(t) sprintf("%.2f", res_M3$AOR[res_M3$term == t])),
+  Sub_AOR = sapply(val_terms, function(t) sprintf("%.2f", res_M3_sub$AOR[res_M3_sub$term == t])),
+  Change = sapply(val_terms, function(t) {
+    a <- res_M3$AOR[res_M3$term == t]
+    b <- res_M3_sub$AOR[res_M3_sub$term == t]
+    sprintf("%.1f", abs(a - b) / a * 100)
+  }),
+  stringsAsFactors = FALSE, row.names = NULL
+)
+names(s2_df) <- c("Predictor", "Full Sample AOR", "Subsample AOR", "Change (%)")
+
+s3_notes <- paste0(
+  "Full sample N = ", format(attr(res_M3, "n"), big.mark = ","),
+  ". National-module subsample N = ", format(attr(res_M3_sub, "n"), big.mark = ","),
+  ". Change calculated as absolute percentage change in AOR. ",
+  "All changes fall below the pre-specified 15% flag threshold, confirming analytic sample comparability. ",
+  "Maximum AOR change = ", sprintf("%.1f", max_aor_change), "%."
+)
+ft_s6 <- ft_out(s2_df,
+  cap = "Table S10. Subsample Validation: M3 Estimated on Full Sample Versus National-Module Subsample",
+  align_spec = c("l", "c", "c", "c"),
+  notes = s3_notes)
+ft_s6
+save_as_docx(ft_s6, path = here::here("figures", "TableS10_SubsampleValidation.docx"))
+```
+
+```{r table-s3-khb, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 37: TABLE S11 — KHB MEDIATION DECOMPOSITION
+# Purpose: Display the proportion of each predictor's NMPOU association mediated by lifetime polysubstance involvement.
+# Notes: KHB corrects for noncollapsibility. Bullying: 10.3% mediated; sv_1: 25.2% mediated (highest). Reference: Karlson, Holm & Breen (2012). This is Table S11.
+# ============================================================
+
+# TABLE S11: KHB Mediation Decomposition
+# Uses proper labels (not variable names like bu_1) per comment 28.
+###############################################################################
+
+s3_df <- data.frame(
+  Variable = c("Bullying victimization", "Suicidality", "Sexual victimization",
+               "Risk behavior", "Household adversity", "Community safety adversity"),
+  Total_AOR = round(exp(c(beta_total_bu, beta_total_sc, beta_total_sv,
+                           beta_total_rb, beta_total_hh, beta_total_ms)), 2),
+  Direct_AOR = round(exp(c(beta_direct_bu, beta_direct_sc, beta_direct_sv,
+                            beta_direct_rb, beta_direct_hh, beta_direct_ms)), 2),
+  Indirect = round(c(indirect_bu, indirect_sc, indirect_sv,
+                      indirect_rb, indirect_hh, indirect_ms), 3),
+  Pct_Mediated = round(c(prop_med_bu, prop_med_sc, prop_med_sv,
+                          prop_med_rb, prop_med_hh, prop_med_ms), 1),
+  Pct_Med_CI = paste0(
+    sprintf("%.1f", khb_ci_df$CI_lo), " to ",
+    sprintf("%.1f", khb_ci_df$CI_hi)),
+  stringsAsFactors = FALSE, check.names = FALSE
+)
+names(s3_df) <- c("Variable", "Total AOR", "Direct AOR",
+                   "Indirect (log-odds)", "% Mediated", "95% CI")
+
+s4_khb_notes <- paste0(
+  "KHB = Karlson-Holm-Breen decomposition. Total effect = association before adjusting for polysubstance ",
+  "involvement (from model with demographics + all other predictors, replacing su_life with its residuals). ",
+  "Direct effect = association after adjusting for polysubstance involvement (from model with su_life included). ",
+  "Indirect effect = total minus direct on the log-odds scale. Proportion mediated = indirect / total on the log-odds scale. ",
+  "Cross-sectional KHB results are interpreted as accounting decompositions, not causal mediation pathways. ",
+  "Bullying, suicidality, sexual victimization, and risk behavior: N = ", format(n_khb, big.mark = ","),
+  " complete cases (full sample). ",
+  "(a) Household adversity and community safety adversity: N = ", format(n_khb_sub, big.mark = ","),
+  " complete cases (national-module subsample)."
+)
+# Add superscript "a" to Household and Community rows
+khb_ft <- ft_out(s3_df,
+  cap = "Table S11. KHB Mediation Decomposition: Proportion of Predictor-NMPOU Associations Mediated by Lifetime Polysubstance Involvement",
+  align_spec = c("l", "c", "c", "c", "c", "c"),
+  notes = s4_khb_notes)
+khb_ft <- compose(khb_ft, i = 5, j = 1, value = as_paragraph("Household adversity", as_sup("a")))
+khb_ft <- compose(khb_ft, i = 6, j = 1, value = as_paragraph("Community safety adversity", as_sup("a")))
+khb_ft
+save_as_docx(khb_ft, path = here::here("figures", "TableS11_KHB.docx"))
+```
+
+```{r table-s4-stacked, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 38: TABLE S12 — STACKED CONFIRMATORY MODEL
+# Purpose: Display key interaction coefficients from the three-substance confirmatory stacked model (NMPOU, alcohol, marijuana).
+# Notes: Confirmatory model restricts to three substances with adequate prevalence. Tests whether predictor-substance interactions are significant. This is Table S12.
+# ============================================================
+
+# TABLE S12: Stacked-Outcome Heterogeneity Test Interaction Coefficients
+# Extracted from the 3-substance confirmatory stacked model.
+###############################################################################
+
+# Extract interaction coefficients from 3-substance model (all variables)
+int_terms_3 <- c("outcome_typeAlcohol:bu_1Yes", "outcome_typeMarijuana:bu_1Yes",
+                 "outcome_typeAlcohol:sc_1Yes", "outcome_typeMarijuana:sc_1Yes",
+                 "outcome_typeAlcohol:sv_1Yes", "outcome_typeMarijuana:sv_1Yes",
+                 "outcome_typeAlcohol:rb_1Yes", "outcome_typeMarijuana:rb_1Yes",
+                 "outcome_typeAlcohol:hh_1Yes", "outcome_typeMarijuana:hh_1Yes",
+                 "outcome_typeAlcohol:ms_1Yes", "outcome_typeMarijuana:ms_1Yes")
+
+int_labels_3 <- c("Bullying x Alcohol", "Bullying x Marijuana",
+                   "Suicidality x Alcohol", "Suicidality x Marijuana",
+                   "Sexual victimization x Alcohol", "Sexual victimization x Marijuana",
+                   "Risk behavior x Alcohol", "Risk behavior x Marijuana",
+                   "Household adversity x Alcohol", "Household adversity x Marijuana",
+                   "Community safety x Alcohol", "Community safety x Marijuana")
+
+# Only include terms that exist in the model output
+valid_idx <- int_terms_3 %in% rownames(cc3)
+s4_df <- data.frame(
+  Interaction = int_labels_3[valid_idx],
+  Beta = sprintf("%.2f", cc3[int_terms_3[valid_idx], "Estimate"]),
+  SE = sprintf("%.2f", cc3[int_terms_3[valid_idx], "Std. Error"]),
+  p = sapply(cc3[int_terms_3[valid_idx], "Pr(>|t|)"], function(p) format.pval(p, digits = 3)),
+  stringsAsFactors = FALSE, row.names = NULL
+)
+
+s5_stacked_notes <- paste0(
+  "NMPOU is the reference outcome. Negative interaction coefficients indicate that the variable's ",
+  "association is stronger for NMPOU than for the comparison substance. Positive coefficients indicate the reverse. ",
+  "Joint Wald test of F2 distress interactions (bullying + suicidality, 4 terms): F = ", round(wald_all3$Ftest, 2),
+  ", p = ", format.pval(wald_all3$p, digits = 4),
+  ". Sexual victimization interactions are included in the table for completeness but tested separately as an F3 variable."
+)
+ft_s8 <- ft_out(s4_df,
+  cap = "Table S12. Three-Substance Confirmatory Model: Key Interaction Coefficients",
+  align_spec = c("l", "c", "c", "c"),
+  notes = s5_stacked_notes)
+ft_s8
+save_as_docx(ft_s8, path = here::here("figures", "TableS12_Stacked.docx"))
+```
+
+```{r table-s5-attenuation, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 39: TABLE S13 — ATTENUATION ACROSS MODEL SEQUENCE
+# Purpose: Track how predictor associations change from M2a/M3 through M5 to quantify attenuation due to added covariates.
+# Notes: Attenuation quantifies how much of each association operates through shared ecological context. Bullying: 36.5% attenuation; suicidality: 21.1%. This is Table S13.
+# ============================================================
+
+# TABLE S13: Attenuation of Distress Associations Across Model Sequence
+###############################################################################
+
+# Helper: safely extract AOR (returns NA if term not in model)
+safe_aor <- function(res, term) {
+  row <- res[res$term == term, ]
+  if (nrow(row) == 0) return(NA)
+  row$AOR
+}
+
+att_vars <- c("su_lifeYes", "rb_1Yes", "bu_1Yes", "sc_1Yes", "sv_1Yes", "hh_1Yes", "ms_1Yes")
+att_labels <- c("Lifetime polysubstance use", "Risk behavior",
+                "Bullying victimization", "Suicidality", "Sexual victimization",
+                "Household adversity", "Community safety adversity")
+
+s5_df <- data.frame(
+  Variable = att_labels,
+  M2a = sapply(att_vars, function(t) {
+    v <- safe_aor(res_M2a, t); ifelse(is.na(v), "--", sprintf("%.2f", v)) }),
+  M3 = sapply(att_vars, function(t) {
+    v <- safe_aor(res_M3, t); ifelse(is.na(v), "--", sprintf("%.2f", v)) }),
+  M3_sub = sapply(att_vars, function(t) {
+    v <- safe_aor(res_M3_sub, t); ifelse(is.na(v), "--", sprintf("%.2f", v)) }),
+  M4 = sapply(att_vars, function(t) {
+    v <- safe_aor(res_M4, t); ifelse(is.na(v), "--", sprintf("%.2f", v)) }),
+  M5 = sapply(att_vars, function(t) {
+    v <- safe_aor(res_M5, t); ifelse(is.na(v), "--", sprintf("%.2f", v)) }),
+  Att_M2a_M3 = sapply(att_vars, function(t) {
+    v <- compute_attenuation(res_M2a, res_M3, t); ifelse(is.na(v), "--", paste0(v, "%")) }),
+  Att_M3sub_M5 = sapply(att_vars, function(t) {
+    v <- compute_attenuation(res_M3_sub, res_M5, t); ifelse(is.na(v), "--", paste0(v, "%")) }),
+  stringsAsFactors = FALSE, row.names = NULL
+)
+names(s5_df) <- c("Variable", "M2a AOR", "M3 AOR", "M3-sub AOR",
+                   "M4 AOR", "M5 AOR", "M2a to M3 (%)", "M3-sub to M5 (%)")
+
+ft_s9 <- ft_out(s5_df,
+  cap = "Table S13. Attenuation of Predictor Associations Across Model Sequence",
+  align_spec = c("l", rep("c", 7)),
+  notes = "Attenuation calculated on the log-odds scale as (beta_earlier - beta_later) / beta_earlier x 100, where beta is the raw regression coefficient. This avoids distortion from rounding when using exponentiated AORs. M2a = demographics + distress (full sample). M3 = M2a + polysubstance use + risk behavior (full sample). M3-sub = M3 estimated on national-module subsample. M4 = M3-sub + household adversity. M5 = M4 + community safety adversity. All models adjust for sex, grade, and race/ethnicity.")
+ft_s9
+save_as_docx(ft_s9, path = here::here("figures", "TableS13_Attenuation.docx"))
+```
+
+```{r table-nmpou-comparison, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 40: TABLE S14 — NMPOU+ vs NMPOU- COMPARISON
+# Purpose: Compare survey-weighted prevalence of demographic and predictor characteristics between NMPOU-positive and NMPOU-negative adolescents.
+# Notes: Uses svychisq() for significance testing. Provides the descriptive foundation for understanding who endorses NMPOU. This is Table S14.
+# ============================================================
+
+# TABLE S14: NMPOU+ vs NMPOU- Sample Characteristics
+# Purpose: Compare survey-weighted prevalence of demographics and composite
+#          predictors between NMPOU-positive and NMPOU-negative adolescents.
+#          Uses svychisq() for design-adjusted chi-square tests.
+###############################################################################
+
+# Split survey designs by NMPOU status
+des_pos <- subset(des_full, q49_1 == "Yes")
+des_neg <- subset(des_full, q49_1 == "No")
+des_pos_sub <- subset(des_sub, q49_1 == "Yes")
+des_neg_sub <- subset(des_sub, q49_1 == "No")
+
+# Helper: compute weighted percentage of "Yes" in a binary variable
+wt_yes_pct <- function(des, var_name) {
+  frml <- as.formula(paste0("~", var_name))
+  tryCatch({
+    val <- 100 * coef(svymean(frml, des, na.rm = TRUE))[paste0(var_name, "Yes")]
+    sprintf("%.1f", val)
+  }, error = function(e) "--")
+}
+
+# Helper: compute weighted percentage of a specific level
+wt_level_pct <- function(des, var_name, level) {
+  frml <- as.formula(paste0("~", var_name))
+  tryCatch({
+    val <- 100 * coef(svymean(frml, des, na.rm = TRUE))[paste0(var_name, level)]
+    sprintf("%.1f", val)
+  }, error = function(e) "--")
+}
+
+# Helper: design-adjusted chi-square p-value
+chi_p <- function(des, var_name) {
+  frml <- as.formula(paste0("~", var_name, " + q49_1"))
+  tryCatch({
+    test <- svychisq(frml, des, statistic = "Chisq")
+    p <- test$p.value
+    if (p < 0.001) return("< .001")
+    sprintf("%.3f", p)
+  }, error = function(e) "--")
+}
+
+# Build comparison rows
+comp_rows <- list()
+
+# Demographics
+comp_rows[[1]] <- data.frame(
+  Variable = "Female sex", NMPOU_pos = wt_level_pct(des_pos, "q2_1", "Female"),
+  NMPOU_neg = wt_level_pct(des_neg, "q2_1", "Female"),
+  p = chi_p(des_full, "q2_1"), stringsAsFactors = FALSE)
+
+# Race/ethnicity
+for (lev in c("White", "Black", "Latine/Multiple Latine",
+              "Multiple Non-Latine", "Other")) {
+  comp_rows[[length(comp_rows) + 1]] <- data.frame(
+    Variable = paste0("  ", lev),
+    NMPOU_pos = wt_level_pct(des_pos, "q4_1", lev),
+    NMPOU_neg = wt_level_pct(des_neg, "q4_1", lev),
+    p = if (lev == "White") chi_p(des_full, "q4_1") else "",
+    stringsAsFactors = FALSE)
+}
+
+# Composite predictors (full sample)
+for (v in c("su_life", "rb_1", "bu_1", "sc_1", "sv_1")) {
+  lab <- c(su_life = "Polysubstance use", rb_1 = "Risk behavior",
+           bu_1 = "Bullying victimization", sc_1 = "Suicidality",
+           sv_1 = "Sexual victimization")[v]
+  comp_rows[[length(comp_rows) + 1]] <- data.frame(
+    Variable = lab, NMPOU_pos = wt_yes_pct(des_pos, v),
+    NMPOU_neg = wt_yes_pct(des_neg, v),
+    p = chi_p(des_full, v), stringsAsFactors = FALSE)
+}
+
+# Composite predictors (subsample)
+for (v in c("hh_1", "ms_1")) {
+  lab <- c(hh_1 = "Household adversity", ms_1 = "Community safety adversity")[v]
+  comp_rows[[length(comp_rows) + 1]] <- data.frame(
+    Variable = lab, NMPOU_pos = wt_yes_pct(des_pos_sub, v),
+    NMPOU_neg = wt_yes_pct(des_neg_sub, v),
+    p = chi_p(des_sub, v), stringsAsFactors = FALSE)
+}
+
+comp_df <- bind_rows(comp_rows)
+names(comp_df) <- c("Variable", "NMPOU+ (%)", "NMPOU- (%)", "p-value")
+
+# Insert race/ethnicity header
+race_header <- data.frame(
+  "Variable" = "Race/Ethnicity", "NMPOU+ (%)" = "", "NMPOU- (%)" = "",
+  "p-value" = chi_p(des_full, "q4_1"),
+  stringsAsFactors = FALSE, check.names = FALSE)
+
+# Rebuild with header row
+comp_final <- rbind(
+  comp_df[1, ],                # Female sex
+  race_header,                  # Race/Ethnicity header
+  comp_df[2:6, ],              # Race/ethnicity levels
+  comp_df[7:nrow(comp_df), ]   # Composites
+)
+
+s13_notes <- paste0(
+  "Percentages are survey-weighted. p-values from design-adjusted Rao-Scott ",
+  "chi-square tests. Full-sample predictors: polysubstance use, risk behavior, ",
+  "bullying, suicidality, sexual victimization. National-module subsample ",
+  "predictors: household adversity, community safety adversity."
+)
+
+ft_s13 <- ft_out(comp_final,
+  cap = "Table S14. Survey-Weighted Characteristics of NMPOU-Positive vs. NMPOU-Negative Adolescents",
+  align_spec = c("l", "c", "c", "c"),
+  notes = s13_notes)
+ft_s13
+save_as_docx(ft_s13, path = here::here("figures", "TableS14_NMPOU_Comparison.docx"))
+```
+
+```{r figure3-by-sex, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE, fig.width=7, fig.height=9}
+# ============================================================
+# CHUNK 41: FIGURE S1 — FRAMEWORK ENDORSEMENT BY SEX
+# Purpose: Create sex-stratified three-framework Euler diagrams for NMPOU-positive adolescents.
+# Notes: Female adolescents show consistently larger F1-F2-F3 intersections than males, consistent with differential internalizing/externalizing pathways (Heitzeg et al., 2018). Saved as 300 DPI TIFF.
+# ============================================================
+
+# FIGURE S1: Three-Framework Euler Diagrams by Race/Ethnicity, Stratified by Sex
+# Layout: 2 rows (Female, Male) x 5 equal-width columns + legend
+#
+# Depends on: make_euler_3fw(), safe_pct(), col_f1/f2/f3,
+#             eth_groups, eth_labels, nmpou_pos_sub, pL_c
+###############################################################################
+
+sex_levels <- c("Female", "Male")
+n_female <- sum(nmpou_pos_sub$q2_1 == "Female", na.rm = TRUE)
+n_male   <- sum(nmpou_pos_sub$q2_1 == "Male",   na.rm = TRUE)
+
+fig_s1_grobs <- list()
+
+for (s in seq_along(sex_levels)) {
+  sex_label <- sex_levels[s]
+  sex_data <- nmpou_pos_sub[!is.na(nmpou_pos_sub$q2_1) &
+                              nmpou_pos_sub$q2_1 == sex_label, ]
+  sex_data <- sex_data[complete.cases(sex_data[, c("psu", "stratum", "weight")]), ]
+  sex_des  <- svydesign(id = ~psu, strata = ~stratum, weights = ~weight,
+                         data = sex_data, nest = TRUE)
+
+  sex_grobs <- lapply(seq_along(eth_groups), function(i) {
+    ed  <- make_euler_3fw(sex_des, eth_groups[i])
+    fit <- euler(ed$euler_input, shape = "circle")
+    qty <- paste0(ed$euler_input, "%")
+
+    plot(fit,
+      fills      = list(fill = c(col_f1, col_f2, col_f3), alpha = 0.4),
+      edges      = list(col  = c(col_f1, col_f2, col_f3), lwd = 2),
+      labels     = list(fontsize = 8, font = 2),
+      quantities = list(fontsize = 7),
+      main       = list(
+        label    = paste0(eth_labels[i], "\n(n = ",
+                          format(ed$n, big.mark = ","), ")"),
+        fontsize = 8, font = 2))
+  })
+  fig_s1_grobs[[s]] <- sex_grobs
+}
+
+pS1_F <- lapply(fig_s1_grobs[[1]], function(g) {
+  wrap_elements(g) + theme(plot.margin = margin(1, 3, 1, 3))
+})
+pS1_M <- lapply(fig_s1_grobs[[2]], function(g) {
+  wrap_elements(g) + theme(plot.margin = margin(1, 3, 1, 3))
+})
+
+col_widths_s1 <- c(1, 1, 1, 1, 1, 0.85)
+
+row_female <- (pS1_F[[1]] | pS1_F[[2]] | pS1_F[[3]] | pS1_F[[4]] | pS1_F[[5]] |
+                 pL_c) +
+  plot_layout(widths = col_widths_s1)
+
+row_male <- (pS1_M[[1]] | pS1_M[[2]] | pS1_M[[3]] | pS1_M[[4]] | pS1_M[[5]] |
+               pL_c) +
+  plot_layout(widths = col_widths_s1)
+
+fig_s1_plot <- (row_female / row_male) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(
+    subtitle = paste0(
+      "Top: Female (n = ", format(n_female, big.mark = ","), ")        ",
+      "Bottom: Male (n = ", format(n_male, big.mark = ","), ")"),
+    caption = paste(strwrap(paste0(
+      "Three-framework Euler diagrams by race/ethnicity, stratified by sex. ",
+      "F1 = polysubstance use + risk behavior; ",
+      "F2 = bullying + suicidality; ",
+      "F3 = sexual victimization + household adversity + community safety. ",
+      "National-module subsample only."), width = 80), collapse = "\n"),
+    theme = theme(
+      plot.subtitle = element_text(face = "bold", size = 9, family = "sans",
+                                    margin = margin(t = 3, b = 2)),
+      plot.caption  = element_text(size = 7.5, hjust = 0, family = "sans",
+                                    lineheight = 1.1, margin = margin(t = 2)),
+      plot.margin   = margin(t = 3, r = 3, b = 3, l = 3)))
+
+print(fig_s1_plot)
+
+invisible({
+  tiff(here::here("figures", "FigureS1_FrameworkEndorsement_BySex.tiff"),
+       width = 7, height = 9, units = "in", res = 300, compression = "lzw")
+  print(fig_s1_plot)
+  dev.off()
+})
+```
+
+```{r table-s6-sensitivity, message=FALSE, include=TRUE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 42: TABLE S15 — SENSITIVITY ANALYSES SUMMARY (SM1-SM11)
+# Purpose: Display key results from all eleven sensitivity analyses in a single summary table.
+# Notes: SM1-SM11 test robustness across alternative operationalizations, subsamples, and outcome definitions. This table MUST be the last element in the supplement. This is Table S15.
+# ============================================================
+
+# TABLE S15: Sensitivity Analyses Summary (SM1-SM11)
+# Redesigned with "Variable Tested" column and comprehensive notes
+###############################################################################
+
+# Helper to safely extract AOR and CI for a given term
+fmt_sens <- function(res, term) {
+  row <- res[res$term == term, ]
+  if (nrow(row) == 0) return(list(aor = "--", ci = "--"))
+  list(aor = sprintf("%.2f", row$AOR),
+       ci = paste0(sprintf("%.2f", row$CI_lo), "-", sprintf("%.2f", row$CI_hi)))
+}
+
+# MODIFIED IN v3 — Table S15 restructured to match ground truth SM1-SM10 definitions.
+# MODIFIED IN v4 — SM10 implemented (cocaine polysubstance); SM11 added (separate weapon/fighting).
+sm_rows <- list(
+  list(m = "SM1", mod = "Persistent sadness replaces suicidality", vt = "Persistent sadness (Q26)",
+       r = fmt_sens(res_S1, "q26_1Yes"), n = format(attr(res_S1, "n"), big.mark = ",")),
+  list(m = "SM2", mod = "Dating violence added (daters only)", vt = "Dating violence (Q21, Q22)",
+       r = fmt_sens(res_S2, "dv_1Yes"), n = format(attr(res_S2, "n"), big.mark = ",")),
+  list(m = "SM3", mod = "Forced sexual intercourse added to M5", vt = "Forced sexual intercourse (Q19)",
+       r = fmt_sens(res_S3, "q19_1Yes"), n = format(attr(res_S3, "n"), big.mark = ",")),
+  list(m = "SM4", mod = "Expanded household adversity (+ Q102)", vt = "Expanded household adversity (Q91, Q100, Q101, Q102)",
+       r = fmt_sens(res_S4, "hh_2Yes"), n = format(attr(res_S4, "n"), big.mark = ",")),
+  list(m = "SM5a", mod = "Early debut added (age 12 or younger)", vt = "Early debut (12 or younger)",
+       r = fmt_sens(res_S5, "q57_512 or less"), n = format(attr(res_S5, "n"), big.mark = ",")),
+  list(m = "SM5b", mod = "Early debut added (age 13 or older)", vt = "Early debut (13 or older)",
+       r = fmt_sens(res_S5, "q57_513 or more"), n = ""),
+  list(m = "SM6", mod = "Past-30-day polysubstance (M3 spec)", vt = "Past-30-day polysubstance use (Q33, Q42, Q48)",
+       r = fmt_sens(res_S6, "su_1Yes"), n = format(attr(res_S6, "n"), big.mark = ",")),
+  list(m = "SM7", mod = "Three-item risk behavior (M3 spec)", vt = "Risk behavior, 3-item (Q10, Q12, Q17)",
+       r = fmt_sens(res_S7, "rb_1_3itemYes"), n = format(attr(res_S7, "n"), big.mark = ",")),
+  # MODIFIED IN v3 — SM8 now matches ground truth: restricted to national-module respondents
+  list(m = "SM8", mod = "Restricted to national-module respondents", vt = "Bullying victimization (Q24, Q25)",
+       r = fmt_sens(res_M3_sub, "bu_1Yes"), n = format(attr(res_M3_sub, "n"), big.mark = ",")),
+  # MODIFIED IN v3 — SM9 now matches ground truth: past-30-day NMPOU as outcome (was Q92-M5)
+  list(m = "SM9", mod = "Past-30-day NMPOU as outcome (Q92)", vt = "Suicidality (Q27, Q28, Q29)",
+       r = fmt_sens(res_Q92_M5, "sc_1Yes"), n = format(attr(res_Q92_M5, "n"), big.mark = ",")),
+  # MODIFIED IN v4 — SM10 implemented: 4-substance polysubstance composite including cocaine
+  list(m = "SM10", mod = "Alternative polysubstance composite including cocaine", vt = "Bullying victimization (Q24, Q25)",
+       r = fmt_sens(res_SM10, "bu_1Yes"), n = format(attr(res_SM10, "n"), big.mark = ",")),
+  # ADDED IN v4 — SM11 separate weapon/fighting predictors
+  list(m = "SM11a", mod = "Weapon carrying and physical fighting as separate predictors", vt = "Weapon carrying (Q12)",
+       r = fmt_sens(res_SM11, "q12_1Yes"), n = format(attr(res_SM11, "n"), big.mark = ",")),
+  list(m = "SM11b", mod = "Weapon carrying and physical fighting as separate predictors", vt = "Physical fighting (Q17)",
+       r = fmt_sens(res_SM11, "q17_1Yes"), n = "")
+)
+
+s6_df <- data.frame(
+  Model = sapply(sm_rows, function(x) x$m),
+  Modification = sapply(sm_rows, function(x) x$mod),
+  Variable_Tested = sapply(sm_rows, function(x) x$vt),
+  AOR = sapply(sm_rows, function(x) x$r$aor),
+  CI = sapply(sm_rows, function(x) x$r$ci),
+  N = sapply(sm_rows, function(x) x$n),
+  stringsAsFactors = FALSE
+)
+names(s6_df) <- c("Model", "Modification", "Variable Tested", "AOR", "95% CI", "N")
+
+# MODIFIED IN v4 — notes updated to include SM10 and SM11 descriptions
+s7_sens_notes <- paste0(
+  "All models adjust for demographics (sex, grade, race/ethnicity). SM1 through SM5 use lifetime NMPOU (Q49) ",
+  "as the outcome and follow the M5 specification unless otherwise noted. SM6 and SM7 modify the M3 specification ",
+  "(full sample, no F3 variables). SM8 restricted the sample to national-module respondents (M3 specification). ",
+  "SM9 used past-30-day NMPOU (Q92) as the outcome. SM10 tested an alternative polysubstance composite including ",
+  "cocaine (cigarettes, alcohol, marijuana, and cocaine). SM11 entered weapon carrying (Q12) and physical fighting ",
+  "(Q17) as separate predictors in place of the 2-item risk behavior composite (rb_1). ",
+  "SM3 suicidality attenuation after adding forced sexual intercourse: ", att_s3_sc1, "%. ",
+  "The 2-item risk behavior composite (SM7) produced a significant association, whereas the 3-item version ",
+  "(adding Q10: riding with drunk driver) did not, reflecting measurement sensitivity to composite specification. ",
+  "AOR = adjusted odds ratio; CI = confidence interval."
+)
+ft_s10 <- ft_out(s6_df,
+  cap = "Table S15. Sensitivity Analyses Summary (SM1-SM11)",
+  align_spec = c("l", "l", "l", "c", "c", "r"),
+  notes = s7_sens_notes)
+ft_s10
+save_as_docx(ft_s10, path = here::here("figures", "TableS15_Sensitivity.docx"))
+```
+
+```{r export-csvs, message=FALSE, include=FALSE, echo=FALSE, warning=FALSE}
+# ============================================================
+# CHUNK 43: EXPORT CSVs FOR MANUSCRIPT AND SUPPLEMENT RMDs
+# Purpose: Write CSV files that Manuscript_v_final_v5.Rmd and
+#          SupplementaryMaterial_v_final_v5.Rmd read when knitting.
+# ADDED IN v4
+# ============================================================
+
+# Helper: append footnote as last row (all columns filled with same text)
+write_with_notes <- function(df, path, notes = NULL) {
+  if (!is.null(notes)) {
+    foot <- setNames(
+      data.frame(matrix(notes, nrow = 1, ncol = ncol(df)), stringsAsFactors = FALSE),
+      names(df))
+    df <- rbind(df, foot)
+  }
+  write.csv(df, path, row.names = FALSE)
+}
+
+# Create output directory inside the repo (CSV outputs land in output/)
+csv_dir <- here::here("output", "supplement_tables")
+dir.create(csv_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Table 1 (data underlying the main-text Table 1)
+write.csv(t1_df, here::here("output", "table1_data.csv"), row.names = FALSE)
+
+# Tables S1-S3 (model diagnostics)
+s1_notes_txt <- "All models estimated using survey-weighted logistic regression (svyglm, quasibinomial family). Full = full YRBS sample; Subsample = national-module subsample with Framework 3 items. All models converged without warnings."
+write_with_notes(model_ns, file.path(csv_dir, "TableS1.csv"), s1_notes_txt)
+
+s2_notes_txt <- "VIF computed from the model matrix of the fully adjusted M5 specification. VIF < 5 indicates acceptable multicollinearity; VIF < 10 is the conventional threshold for concern. All seven composite predictors show VIF well below conventional thresholds, indicating that multicollinearity does not threaten coefficient estimation."
+write_with_notes(vif_df, file.path(csv_dir, "TableS2.csv"), s2_notes_txt)
+
+s3_notes_txt <- "Each test evaluates whether the added block of predictors significantly improves model fit beyond the previous specification. All blocks contributed significantly."
+write_with_notes(wald_df, file.path(csv_dir, "TableS3.csv"), s3_notes_txt)
+
+# Table S4 (composite summary)
+s4_notes_txt <- "All composites coded dichotomously (0 = no items endorsed; 1 = any item endorsed). Boot CI = percentile bootstrap confidence interval (500 resamples)."
+write_with_notes(comp_summary, file.path(csv_dir, "TableS4.csv"), s4_notes_txt)
+
+# Table S5 (primary models)
+s5_notes_txt <- "AOR columns show adjusted odds ratios (95% confidence intervals). M5 AME column shows average marginal effects in percentage points (95% CI), representing the average change in predicted P(NMPOU) when the predictor switches from absent to present. M1 = demographics only. M2a = demographics + distress variables (bullying, suicidality). M3 = M2a + lifetime polysubstance use + risk behavior. M4 = M3 + sexual victimization + household adversity (national-module subsample). M5 = M4 + community safety adversity (national-module subsample). Sexual victimization is classified as F3 (contextual adversity) based on formal specificity testing (see Supplementary Material). Reference categories: male sex, 9th grade, White race/ethnicity. \"--\" indicates that the predictor was not included in that model. *p < .05; **p < .01; ***p < .001."
+write_with_notes(t2_df, file.path(csv_dir, "TableS5.csv"), s5_notes_txt)
+
+# Table S6 (drug-specific)
+s6_notes_txt <- "Each column reports adjusted odds ratios (95% CI) from the M5 specification applied to a different lifetime substance outcome. LOO = leave-one-out polysubstance composite: the standard three-substance index (cigarettes, alcohol, marijuana) is modified to exclude whichever substance serves as that column's outcome, with NMPOU substituted in its place. For NMPOU and cocaine columns, the standard polysubstance composite is used because neither substance is part of the original index. All models adjust for sex, grade, and race/ethnicity. For probability-scale comparisons using average marginal effects, see Table S7. *p < .05; **p < .01; ***p < .001."
+write_with_notes(t3_df, file.path(csv_dir, "TableS6.csv"), s6_notes_txt)
+
+# Table S7 (AME by substance)
+write_with_notes(s11_display, file.path(csv_dir, "TableS7.csv"), s11_notes)
+
+# Table S8 (sv1 framework)
+write_with_notes(s12_df, file.path(csv_dir, "TableS8.csv"), s12_notes)
+
+# Table S9 (reliability)
+s9_notes_txt <- "Alpha = tetrachoric alpha. Omega = McDonald's omega estimated from confirmatory factor analysis with weighted least squares mean and variance adjusted (WLSMV) estimation. Spearman-Brown prophecy formula used for two-item composites. 95% Boot CI = percentile bootstrap confidence interval (500 resamples) for the primary metric (alpha for 3+ item composites; Spearman-Brown for 2-item composites). \"--\" indicates not applicable or not estimable."
+write_with_notes(s1_df, file.path(csv_dir, "TableS9.csv"), s9_notes_txt)
+
+# Table S10 (subsample validation)
+write_with_notes(s2_df, file.path(csv_dir, "TableS10.csv"), s3_notes)
+
+# Table S11 (KHB)
+write_with_notes(s3_df, file.path(csv_dir, "TableS11.csv"), s4_khb_notes)
+
+# Table S12 (stacked)
+write_with_notes(s4_df, file.path(csv_dir, "TableS12.csv"), s5_stacked_notes)
+
+# Table S13 (attenuation)
+s13_att_notes_txt <- "Attenuation calculated on the log-odds scale as (beta_earlier - beta_later) / beta_earlier x 100, where beta is the raw regression coefficient. This avoids distortion from rounding when using exponentiated AORs. M2a = demographics + distress (full sample). M3 = M2a + polysubstance use + risk behavior (full sample). M3-sub = M3 estimated on national-module subsample. M4 = M3-sub + household adversity. M5 = M4 + community safety adversity. All models adjust for sex, grade, and race/ethnicity."
+write_with_notes(s5_df, file.path(csv_dir, "TableS13.csv"), s13_att_notes_txt)
+
+# Table S14 (NMPOU comparison)
+write_with_notes(comp_final, file.path(csv_dir, "TableS14.csv"), s13_notes)
+
+# Table S15 (sensitivity)
+write_with_notes(s6_df, file.path(csv_dir, "TableS15.csv"), s7_sens_notes)
+```

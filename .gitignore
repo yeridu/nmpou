@@ -1,0 +1,56 @@
+# R session / IDE
+.Rhistory
+.RData
+.Rproj.user/
+*.Rcheck/
+
+# renv
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/staging/
+
+# Raw data and microdata derivatives (NEVER commit)
+data/*.mdb
+data/*.accdb
+data/*.csv
+data/*.rds
+data/*.RData
+!data/.gitkeep
+!data/README.md
+
+# Output artifacts (regenerated on reproduction)
+output/*
+!output/.gitkeep
+tables/*
+!tables/.gitkeep
+figures/*
+!figures/.gitkeep
+
+# Knit byproducts
+*.html
+*.docx
+*.pdf
+*_files/
+*_cache/
+
+# Word lock files
+~$*.docx
+~$*.doc
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Editor / local
+.vscode/
+.idea/
+*.swp
+.spotify_cache
+.env
+.env.*
+*.key
+*.pem
