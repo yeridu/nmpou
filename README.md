@@ -6,6 +6,15 @@ This repository contains the analysis code accompanying the manuscript
 > Mario Morales, MPP; Maeve E. Wallace, PhD; Beth E. Meyerson, PhD; Jennifer S. De La Rosa, PhD
 > Health Promotion Sciences, Mel and Enid Zuckerman College of Public Health, University of Arizona, Tucson, AZ
 
+## Poster and flash-talk video
+
+This study is entered in the Early Career Poster Competition at the **2026 College on Problems of Drug Dependence (CPDD) Annual Meeting** (Portland, OR; June 13-17, 2026). The conference poster and its accompanying ~3-minute flash-talk video are included in this repository:
+
+- **[Poster (PDF)](poster_and_video/poster_bullying_opioid_risk.pdf)**
+- **[Flash-talk video, ~3 min (MP4)](poster_and_video/video_bullying_opioid_risk.mp4)**
+
+Each opens in the browser on GitHub (PDF viewer / video player); use the **Download** button on the file's page to save a copy.
+
 ## Submission status
 
 Originally submitted on **March 8, 2026** to *Pediatrics* (American Academy of Pediatrics; manuscript ID **PEDIATRICS/2026/076760**). The manuscript was transferred at the editor's recommendation to *Pediatrics Open Science* (American Academy of Pediatrics; Gold Open Access; Plan S-compliant) under manuscript ID **PEDSOS/2026/001614**, where it is currently under review.
@@ -128,7 +137,8 @@ nmpou/
 |   `-- .gitkeep                           # The .mdb is NOT in this repo
 |-- output/.gitkeep                        # CSV outputs land here on reproduction
 |-- tables/.gitkeep                        # CSV intermediates land here on reproduction
-`-- figures/.gitkeep                       # TIFFs and Word tables land here on reproduction
+|-- figures/.gitkeep                       # TIFFs and Word tables land here on reproduction
+`-- poster_and_video/                      # Conference poster (PDF) and flash-talk video (MP4)
 ```
 
 ## Outputs produced

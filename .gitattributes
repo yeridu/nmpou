@@ -2,3 +2,8 @@
 *.Rmd  text eol=lf
 *.R    text eol=lf
 *.md   text eol=lf
+
+# Binary dissemination assets -- never apply text/EOL conversion
+*.pdf binary
+*.mp4 binary
+*.png binary

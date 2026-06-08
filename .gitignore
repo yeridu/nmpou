@@ -36,6 +36,11 @@ figures/*
 *_files/
 *_cache/
 
+# Dissemination: final poster (PDF) and flash-talk video (MP4) -- intentionally tracked,
+# overriding the *.pdf ignore above for this folder only.
+!poster_and_video/*.pdf
+!poster_and_video/*.mp4
+
 # Word lock files
 ~$*.docx
 ~$*.doc
