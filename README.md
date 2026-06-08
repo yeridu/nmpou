@@ -10,10 +10,8 @@ This repository contains the analysis code accompanying the manuscript
 
 This study is entered in the Early Career Poster Competition at the **2026 College on Problems of Drug Dependence (CPDD) Annual Meeting** (Portland, OR; June 13-17, 2026). The conference poster and its accompanying ~3-minute flash-talk video are included in this repository:
 
-- **[Poster (PDF)](poster_and_video/poster_bullying_opioid_risk.pdf)**
-- **[Flash-talk video, ~3 min (MP4)](poster_and_video/video_bullying_opioid_risk.mp4)**
-
-Each opens in the browser on GitHub (PDF viewer / video player); use the **Download** button on the file's page to save a copy.
+- **[Poster (PDF)](poster_and_video/poster_bullying_opioid_risk.pdf)** -- opens in GitHub's in-browser PDF viewer.
+- **[Flash-talk video, ~3 min (MP4)](https://github.com/yeridu/nmpou/raw/main/poster_and_video/video_bullying_opioid_risk.mp4)** -- click to download and play (~4 MB). GitHub cannot preview a video this long in the browser, so the link downloads the file.
 
 ## Submission status
 
