@@ -13,6 +13,13 @@ This study is entered in the Early Career Poster Competition at the **2026 Colle
 - **[Poster (PDF)](poster_and_video/poster_bullying_opioid_risk.pdf)** -- opens in GitHub's in-browser PDF viewer.
 - **[Flash-talk video, ~3 min (MP4)](https://github.com/yeridu/nmpou/raw/main/poster_and_video/video_bullying_opioid_risk.mp4)** -- click to download and play (~4 MB). GitHub cannot preview a video this long in the browser, so the link downloads the file.
 
+## How the analysis works (plain-language explainers)
+
+Short, non-technical guides to the two main methods, so anyone can follow exactly how the analysis was done:
+
+- **[Stacked-outcome specificity test](stacked-outcome-test_explanation.md)** -- how we tested whether a risk factor is specific to opioids.
+- **[KHB decomposition](khb-decomposition_explanation.md)** -- how much of a risk factor's opioid link is direct versus carried by general substance use.
+
 ## Submission status
 
 Originally submitted on **March 8, 2026** to *Pediatrics* (American Academy of Pediatrics; manuscript ID **PEDIATRICS/2026/076760**). The manuscript was transferred at the editor's recommendation to *Pediatrics Open Science* (American Academy of Pediatrics; Gold Open Access; Plan S-compliant) under manuscript ID **PEDSOS/2026/001614**, where it is currently under review.
