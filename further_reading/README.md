@@ -9,7 +9,7 @@ The peer-reviewed review below lays out that mechanism in detail. It is included
 ## Contents
 
 - **Galiza-Soares-2025_opioidergic-tuning-of-social-attachment.pdf** -- the open-access article.
-- **Galiza-Soares-2025_opioidergic-tuning-of-social-attachment_video.mp4** -- a short video summary of the article (~44 MB; large files download rather than preview on GitHub).
+- **Galiza-Soares-2025_opioidergic-tuning-of-social-attachment_video.mp4** -- a short video summary of the article (~6 MB; plays on the demo page -- GitHub's file view never previews videos).
 
 ## Reference
 
