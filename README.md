@@ -6,6 +6,10 @@ This repository contains the analysis code accompanying the manuscript
 > Mario Morales, MPP; Maeve E. Wallace, PhD; Beth E. Meyerson, PhD; Jennifer S. De La Rosa, PhD
 > Health Promotion Sciences, Mel and Enid Zuckerman College of Public Health, University of Arizona, Tucson, AZ
 
+## Interactive demo page (phone-friendly)
+
+**https://yeridu.github.io/nmpou/** -- open this on a phone (or any browser). The flash-talk video and the reference video **play with one tap**, with buttons to the plain-language method explainers and the background article. (GitHub cannot play videos inside the repository view; this page can.)
+
 ## Poster and flash-talk video
 
 This study is entered in the Early Career Poster Competition at the **2026 College on Problems of Drug Dependence (CPDD) Annual Meeting** (Portland, OR; June 13-17, 2026). The conference poster and its accompanying ~3-minute flash-talk video are included in this repository:
@@ -19,6 +23,12 @@ Short, non-technical guides to the two main methods, so anyone can follow exactl
 
 - **[Stacked-outcome specificity test](stacked-outcome-test_explanation.md)** -- how we tested whether a risk factor is specific to opioids.
 - **[KHB decomposition](khb-decomposition_explanation.md)** -- how much of a risk factor's opioid link is direct versus carried by general substance use.
+
+## A proposed biological mechanism (background, not part of this study)
+
+For readers who want to understand -- or scrutinize -- one *possible* biological reason for our finding (that social pain and physical pain may share the brain's opioid system), we include a peer-reviewed, open-access review as **background reference only**:
+
+- **[Proposed mechanism: article and video summary](further_reading/)** -- Galiza Soares et al. (2025), *Frontiers in Neuroanatomy*, open access (CC BY). **This is not part of our analysis or results; we did not produce it.**
 
 ## Submission status
 

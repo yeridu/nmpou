@@ -59,3 +59,8 @@ desktop.ini
 .env.*
 *.key
 *.pem
+
+# Reference material (further reading) -- override the *.pdf ignore for this folder
+!further_reading/*.pdf
+!further_reading/*.mp4
+!further_reading/*.md
