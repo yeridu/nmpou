@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMPOU -- CPDD 2026 supplementary materials</title>
+<style>
+  :root{ --amber:#C26A0A; --teal:#1F7E70; --coral:#A93527; --ink:#15151B; --dim:#5b5b63; --line:#e6e3dc; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:#fbfaf7; color:var(--ink);
+        font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+        line-height:1.5; }
+  .wrap{ max-width:760px; margin:0 auto; padding:18px 16px 48px; }
+  header{ border-bottom:3px solid var(--amber); padding-bottom:14px; margin-bottom:8px; }
+  .kicker{ font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:var(--amber); font-weight:700; }
+  h1{ font-size:21px; line-height:1.25; margin:6px 0 4px; }
+  .by{ font-size:14px; color:var(--dim); }
+  section{ margin-top:26px; }
+  h2{ font-size:18px; margin:0 0 6px; }
+  p{ margin:6px 0; }
+  .muted{ color:var(--dim); font-size:14px; }
+  video{ width:100%; height:auto; border-radius:12px; background:#000; margin-top:8px;
+         border:1px solid var(--line); }
+  .btn{ display:block; text-decoration:none; text-align:center; font-weight:700; font-size:16px;
+        padding:15px 16px; border-radius:12px; margin:10px 0; color:#fff; }
+  .btn.amber{ background:var(--amber); } .btn.teal{ background:var(--teal); } .btn.coral{ background:var(--coral); }
+  .btn.ghost{ background:#fff; color:var(--ink); border:1.5px solid var(--line); }
+  .note{ background:#fbeede; border-left:5px solid var(--amber); border-radius:8px;
+         padding:12px 14px; font-size:14.5px; }
+  .note b{ color:var(--amber); }
+  footer{ margin-top:36px; padding-top:14px; border-top:1px solid var(--line); font-size:13px; color:var(--dim); }
+  a{ color:var(--teal); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">CPDD 2026 -- Supplementary materials</div>
+    <h1>Why Opioids? Bullying and Opioid-Specific Risk in U.S. Adolescents</h1>
+    <div class="by">Mario Morales &amp; Jennifer S. De La Rosa &middot; University of Arizona</div>
+  </header>
+
+  <section>
+    <h2>1. Three-minute flash-talk</h2>
+    <p class="muted">Tap play to watch the presentation.</p>
+    <video controls preload="metadata" playsinline webkit-playsinline
+           src="poster_and_video/video_bullying_opioid_risk.mp4"></video>
+  </section>
+
+  <section>
+    <h2>2. How the analysis works (plain language)</h2>
+    <p class="muted">Step-by-step explanations of the two methods, for anyone.</p>
+    <a class="btn teal" href="https://github.com/yeridu/nmpou/blob/main/stacked-outcome-test_explanation.md">Stacked-outcome specificity test</a>
+    <a class="btn teal" href="https://github.com/yeridu/nmpou/blob/main/khb-decomposition_explanation.md">KHB decomposition</a>
+  </section>
+
+  <section>
+    <h2>3. A proposed biological mechanism</h2>
+    <div class="note"><b>Reference only -- not part of this study.</b> Our paper reports an association. The video and article below explain one <i>possible</i> biological reason for it (social pain and physical pain sharing the brain's opioid system). We did not produce this work and our study does not test it. Included for readers who want the background or who are skeptical.</div>
+    <video controls preload="none" playsinline webkit-playsinline
+           src="further_reading/Galiza-Soares-2025_opioidergic-tuning-of-social-attachment_video.mp4"></video>
+    <a class="btn coral" href="further_reading/Galiza-Soares-2025_opioidergic-tuning-of-social-attachment.pdf">Read the article (open access, CC BY)</a>
+    <p class="muted">Galiza Soares JA, Sutley-Koury SN, Pomrenze MB, Tucciarone JM. Opioidergic tuning of social attachment. <i>Front Neuroanat.</i> 2025;18:1521016. <a href="https://doi.org/10.3389/fnana.2024.1521016">doi:10.3389/fnana.2024.1521016</a></p>
+  </section>
+
+  <section>
+    <h2>4. Poster and full code</h2>
+    <a class="btn amber" href="poster_and_video/poster_bullying_opioid_risk.pdf">Conference poster (PDF)</a>
+    <a class="btn ghost" href="https://github.com/yeridu/nmpou">Full reproducible code (GitHub repository)</a>
+  </section>
+
+  <footer>
+    Data: 2023 Youth Risk Behavior Survey (CDC), <a href="https://www.cdc.gov/yrbs/">cdc.gov/yrbs</a>.
+    Code and these materials: <a href="https://github.com/yeridu/nmpou">github.com/yeridu/nmpou</a>.
+    Section 3 reproduced with attribution under CC BY; copyright remains with the original authors.
+  </footer>
+
+</div>
+</body>
+</html>

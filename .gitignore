@@ -64,3 +64,5 @@ desktop.ini
 !further_reading/*.pdf
 !further_reading/*.mp4
 !further_reading/*.md
+# GitHub Pages landing page -- override the *.html knit-byproduct ignore
+!index.html
