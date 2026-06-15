@@ -14,11 +14,19 @@ The stacked-outcome test showed that bullying is linked specifically to opioids.
 
 The idea is simple. A bullied adolescent may be more likely to use opioids for two different reasons: (a) a direct path from bullying to opioids, and (b) an indirect path, because bullied adolescents tend to use more of every substance, and opioids are part of "every substance." A risk factor that is truly opioid-specific should be mostly direct -- only a small share should run through general substance use.
 
-**2. The intuition: shared with general use, or its own**
+**2. The intuition: a direct payment or one routed through a middleman**
 
-When bullying is linked to opioid use, that link can come from two sources. Part of it may be shared with general substance use: bullied adolescents tend to use more substances of all kinds, and opioid use usually appears together with that general use, so part of the bullying-opioid link is really just this overlap. The rest is bullying's own link to opioids, separate from general use.
+Picture a risk factor (say, bullying) as sending money to a single recipient, "opioid use." The money can travel by two routes:
 
-KHB splits the link between these two sources and reports how large the shared part is. For bullying, only about a tenth of the link is the shared part, so almost all of it is bullying's own -- consistent with opioid specificity. For sexual victimization, about a quarter is the shared part, so more of its link travels with general substance use -- consistent with broad rather than opioid-specific risk.
+- **Direct:** bullying hands the money straight to opioid use. For bullying, this is the social-pain-to-opioid pathway -- a channel that belongs to opioids alone.
+- **Through a middleman:** bullying first pays into a general account, "uses many substances." Because opioids are one of the substances in that account, part of bullying's money reaches opioids only by passing through this middleman.
+
+KHB is the forensic accountant. It opens the books and reports one number: of every dollar bullying sends to opioids, how many cents went direct and how many passed through the middleman.
+
+- A truly opioid-specific risk factor pays almost entirely direct. Bullying did: only about 10 cents on the dollar (10.3%) traveled through the middleman.
+- A broad risk factor routes a large share through the middleman. Sexual victimization did: about 25 cents on the dollar (25.2%) -- the signature of general rather than opioid-specific risk.
+
+The whole method is just a careful way of doing this accounting so that the two routes are measured on the same scale. Section 3 explains why that turns out to be the hard part.
 
 **3. Why you cannot just compare two simple models (the trap)**
 
@@ -26,25 +34,51 @@ The obvious approach would be to fit two logistic models -- one without polysubs
 
 In plain words: in logistic regression, simply adding any variable changes the scale of all the coefficients (the model's built-in amount of unexplained variation is fixed, so adding a variable rescales everything). As a result, a coefficient can shrink when you add polysubstance use even if there is no real mediation at all -- a false impression of mediation. So the naive two-model comparison can mislead.
 
-**4. The KHB fix (residualizing the mediator)**
+**4. The KHB fix in one idea**
 
-KHB removes the trap by making the two models contain the **same number of variables**, so they are on the **same scale** and can be compared cleanly. It does this with a trick: instead of dropping polysubstance use, it replaces it with the **part of polysubstance use that is not explained by the risk factor** (its "residual").
+KHB removes the trap by making the two models contain the **same number of variables**, so they sit on the **same scale** and can be compared cleanly. It does this with a trick: instead of dropping polysubstance use from one model, it **replaces** it with the part of polysubstance use that is not explained by the risk factor (its "residual").
 
-Because the residual carries no information about the risk factor, putting it in the model lets the risk factor's coefficient absorb its full (total) effect; putting the real polysubstance measure in instead gives the direct effect. Both models have the same number of variables, so the difference between the two coefficients is a clean mediation estimate, free of the rescaling artifact.
+Because that residual carries no information about the risk factor, putting it in the model lets the risk factor's coefficient absorb its full (total) effect; putting the real polysubstance measure in instead gives the direct effect. Both models have the same number of variables, so the difference between the two coefficients is a clean mediation estimate, free of the rescaling artifact. The next section shows exactly how that residual is built, because it is the part everything else depends on.
 
-**5. The three steps (with the code and variable names)**
+**5. How the residual is built (the heart of the fix)**
+
+The fix in Section 4 rests entirely on one new ingredient: the residual of polysubstance use. Here is exactly how it is made and why it works.
+
+**Step A -- predict polysubstance use from the risk factor.** Fit a survey-weighted **linear** regression with polysubstance use (coded 0/1) as the outcome and the risk factor -- plus the other risk factors and demographics -- as predictors. For each student this produces a predicted value: the amount of polysubstance use that the risk factor and the covariates can account for.
+
+**Step B -- subtract.** The residual is the actual value minus the predicted value:
+
+residual = (did the student actually use other substances? 0 or 1) minus (the value predicted from bullying and covariates)
+
+A worked illustration with two bullied students:
+
+| Student | Actually used other substances? | Predicted from bullying + covariates | Residual |
+|---------|---------------------------------|--------------------------------------|----------|
+| Ana | 1 (yes) | 0.70 | +0.30 |
+| Beto | 0 (no) | 0.70 | -0.70 |
+
+Ana uses more than her profile predicts (a positive residual); Beto uses less (a negative residual). The residual is "polysubstance use with the part explained by bullying stripped out" -- what remains after bullying's footprint is removed.
+
+**Why this is the key.** By the mathematics of linear regression, this residual is **uncorrelated with the risk factor** (its correlation with bullying is exactly zero). That single property is what the method needs:
+
+- Put the **real** polysubstance measure in the model and it shares information with bullying, so it absorbs the mediated part of bullying's effect; bullying's coefficient is then the **direct** effect.
+- Put the **residual** in instead and it shares no information with bullying, so it absorbs nothing from bullying; bullying's coefficient returns to its **total** effect.
+
+Both models still contain exactly one polysubstance term, so they sit on the same logistic scale. The gap between the two coefficients is therefore clean mediation, not the rescaling artifact of Section 3.
+
+(The linear regression in Step A is deliberate. Only ordinary least squares guarantees a residual that is exactly uncorrelated with the predictors, which is the property the whole method rests on. This holds even though polysubstance use is a yes/no variable.)
+
+**6. The three steps (with the code and variable names)**
 
 Using bullying (bu_1) as the example, the outcome is NMPOU (q49_1) and the mediator is lifetime polysubstance use (su_life, with a 0/1 numeric version su_life_num for the linear step).
 
-Step 1 -- explain the mediator. Regress the mediator on the risk factor plus all the other risk factors and demographics, using survey-weighted **linear** regression, and save the residuals. In the script:
+Step 1 -- build the residual (the procedure explained in Section 5). Regress the mediator on the risk factor plus all the other risk factors and demographics, using survey-weighted linear regression, and save the residuals:
 
 ```r
 stage1_bu <- svyglm(su_life_num ~ bu_1 + rb_1 + sc_1 + sv_1 + q2_1 + q3_1 + q4_1,
                     design = des_khb, family = gaussian())
 resid_su_bu <- residuals(stage1_bu)
 ```
-
-(The linear, gaussian, step is deliberate: it guarantees the residuals are uncorrelated with the risk factor, which is what the method needs; this holds even though the mediator is yes/no.)
 
 Step 2a -- the direct effect. Fit the full logistic model that includes the real polysubstance measure; the coefficient on the risk factor is the direct effect:
 
@@ -67,11 +101,11 @@ indirect_bu <- beta_total_bu - beta_direct_bu
 prop_med_bu <- (indirect_bu / beta_total_bu) * 100   # percent mediated
 ```
 
-**6. A worked example**
+**7. A worked example**
 
 Suppose bullying's total log-odds coefficient is 0.50 and its direct coefficient is 0.45. Then the indirect (mediated) part is 0.50 - 0.45 = 0.05, and the percent mediated is 0.05 / 0.50 times 100 = 10 percent. In this study bullying's mediated share was about 10.3 percent -- the rest of its association is direct.
 
-**7. What the decomposition found**
+**8. What the decomposition found**
 
 Lower percent mediated means more of the association is direct, which is the signature of a more opioid-specific risk factor.
 
@@ -86,16 +120,34 @@ Lower percent mediated means more of the association is direct, which is the sig
 
 Confidence intervals for these shares come from a design-based bootstrap that resamples primary sampling units within strata, which respects the survey design.
 
-**8. How to read the numbers honestly**
+**9. How to read the numbers honestly**
 
 - This is an accounting decomposition, not causal mediation. With cross-sectional data we cannot claim that polysubstance use causally transmits the effect of bullying on opioids. KHB tells us what fraction of the risk factor's log-odds is statistically accounted for by its shared association with polysubstance use. A causal mediation claim would require temporal ordering (the mediator before the outcome) and no unmeasured confounders of the mediator-outcome relationship.
 - The percent mediated is scale-free. Because both models share the same scale, the unexplained-variation term cancels out of the ratio, so the percent mediated is not distorted by the logistic-scale problem described in Section 3.
 
-**9. How this relates to the source papers**
+**10. How this relates to the original KHB method (what we kept, what we changed)**
 
-The method comes from Karlson, Holm, and Breen (2012), with the total-direct-indirect interpretation formalized by Breen, Karlson, and Holm (2013); both are cited below. The reason the naive two-model comparison fails (Section 3) is the same logistic scale problem that Allison (1999) raised for comparing coefficients across groups in the companion stacked-outcome method. KHB's residualization puts the two models on a common scale, which is why its percent mediated is scale-free and does not require estimating any noise-ratio correction.
+The decomposition comes from Karlson, Holm, and Breen (2012), with the total-direct-indirect interpretation formalized by Breen, Karlson, and Holm (2013). It is worth being explicit about what we adopted and what we did differently.
 
-**10. Where this lives in the code**
+*The shared problem.* In logistic and probit models, a coefficient is scaled by the model's unexplained variation, and adding a mediator rescales every coefficient even when nothing is truly mediated (Section 3). Comparing a risk factor's coefficient before and after adding the mediator therefore confounds real mediation with pure rescaling. This is the problem KHB was built to solve.
+
+*What is similar to the original KHB method.*
+
+- We use the central KHB device exactly as published: residualize the mediator against the risk factor, then compare the risk factor's coefficient with the real mediator (the direct effect) against its coefficient with the residual (the total effect).
+- We read the difference between the two as the indirect (mediated) part and report it as a percent mediated, which is scale-free -- the main advantage KHB has over the naive two-model comparison.
+- We keep KHB's requirement that both models contain the same predictors, so they share a single logistic scale.
+
+*What is different in our study.*
+
+- Survey design. The original method was developed for ordinary (often independent) samples. We implemented every step on the complex survey design of the YRBS: the stage-1 regression is survey-weighted (svyglm with the gaussian family), and the two stage-2 models are survey-weighted quasibinomial. The standard khb software package does not take this design directly, so we built the three steps by hand to respect the weights, strata, and clustering.
+- Uncertainty. Instead of the package's model-based standard errors, our confidence intervals come from a design-based bootstrap that resamples primary sampling units within strata, which honors the survey design.
+- One mediator, six risk factors. We run the same decomposition separately for each of the six adversities, always with a single mediator -- lifetime polysubstance use -- chosen because it is the concrete embodiment of the "general substance use" pathway that the frameworks predict.
+- Interpretation. We treat the result as an accounting decomposition, not causal mediation (Section 9). The original papers present the algebra; whether it carries a causal meaning depends on assumptions (temporal order, no unmeasured confounding) that cross-sectional YRBS data cannot satisfy, so we are deliberately more cautious in wording than a causal-mediation application would be.
+- Relation to the companion method. The reason the naive two-model comparison fails is the same logistic scale problem that Allison (1999) raised for comparing coefficients across groups in the stacked-outcome method. KHB's residualization is an elegant way around it that needs no estimate of any noise ratio, which is why the percent mediated is scale-free.
+
+*In one sentence.* We use KHB's residualization and its scale-free percent-mediated exactly as published, but reimplement it by hand for a weighted, clustered survey sample with bootstrap intervals, and we report it as an accounting decomposition rather than a causal one.
+
+**11. Where this lives in the code**
 
 All steps above are in the analysis script (nonmedicaluse_painmed_script_v4.Rmd), in the KHB chunk:
 
